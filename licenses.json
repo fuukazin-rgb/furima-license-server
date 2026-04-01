@@ -1,10 +1,64 @@
 {
   "licenses": [
     {
-      "licenseKey": "FURIMA-001",
+      "licenseKey": "FRP-8XK2-Q7M9-L4T6",
       "status": "active",
       "plan": "year",
-      "boundDeviceId": "10fcdfde08c98ca0e42c3e493ac17297"
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FRP-3NVD-K8P4-T2X7",
+      "status": "active",
+      "plan": "year",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FRP-7KQ2-M4TX-P9V3",
+      "status": "active",
+      "plan": "year",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FRP-2LND-X8R5-K6W1",
+      "status": "cancelled",
+      "plan": "year",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FRP-9TMA-Q3K7-V2P8",
+      "status": "active",
+      "plan": "year",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FRP-6WKP-T9R4-X2M7",
+      "status": "active",
+      "plan": "year",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FRP-4QMX-K7T2-R8V9",
+      "status": "active",
+      "plan": "year",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FRP-8RVT-M2K7-Q4X6",
+      "status": "active",
+      "plan": "year",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FRP-3TKQ-V9M4-X7R2",
+      "status": "active",
+      "plan": "year",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FRP-7MXR-Q2V8-K4T9",
+      "status": "active",
+      "plan": "year",
+      "boundDeviceId": ""
     }
   ]
 }
