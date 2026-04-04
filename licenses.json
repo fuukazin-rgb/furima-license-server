@@ -59,6 +59,66 @@
       "status": "active",
       "plan": "year",
       "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FKA-3X8K-Q2M7-T9V4",
+      "status": "active",
+      "plan": "month",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FKA-7NP4-K6T2-V8M3",
+      "status": "active",
+      "plan": "month",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FKA-2QT9-M4K8-X7V3",
+      "status": "active",
+      "plan": "month",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FKA-6MV3-T8P2-K9X4",
+      "status": "active",
+      "plan": "month",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FKA-9KX7-V4T3-M2Q8",
+      "status": "active",
+      "plan": "month",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FKA-4TV8-Q3K9-X2M6",
+      "status": "active",
+      "plan": "year",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FKA-8MQ2-X7V4-K3T9",
+      "status": "active",
+      "plan": "year",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FKA-5XT3-K8M2-V7Q4",
+      "status": "active",
+      "plan": "year",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FKA-1KV9-T4Q8-M3X7",
+      "status": "active",
+      "plan": "year",
+      "boundDeviceId": ""
+    },
+    {
+      "licenseKey": "FKA-TEST-0000-0001",
+      "status": "active",
+      "plan": "month",
+      "boundDeviceId": ""
     }
   ]
 }
