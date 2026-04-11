@@ -498,6 +498,68 @@ app.post("/trial/status", async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════
+//  /trial/reset
+//  開発・サポート用: 指定deviceIdのトライアルをリセット（削除）する
+//  削除後に /trial/start を呼べば新しいトライアルが始まる
+// ═══════════════════════════════════════════════════════════════
+app.post("/trial/reset", async (req, res) => {
+  try {
+    const { deviceId, fingerprint } = req.body || {};
+
+    if (!deviceId && !fingerprint) {
+      return res.status(400).json({
+        ok: false,
+        message: "deviceId or fingerprint is required"
+      });
+    }
+
+    let deletedCount = 0;
+
+    // deviceIdで削除
+    if (deviceId) {
+      const { error, count } = await supabase
+        .from("trials")
+        .delete()
+        .eq("first_device_id", deviceId);
+
+      if (error) {
+        console.error("/trial/reset delete by deviceId error:", error);
+        throw error;
+      }
+      deletedCount += (count || 0);
+    }
+
+    // fingerprintで削除
+    if (fingerprint) {
+      const { error, count } = await supabase
+        .from("trials")
+        .delete()
+        .eq("fingerprint", fingerprint);
+
+      if (error) {
+        console.error("/trial/reset delete by fingerprint error:", error);
+        throw error;
+      }
+      deletedCount += (count || 0);
+    }
+
+    console.log("trial/reset", { deviceId, fingerprint, deletedCount });
+
+    return res.json({
+      ok: true,
+      message: "トライアルをリセットしました。再度 /trial/start を呼んでください。",
+      deletedCount
+    });
+  } catch (e) {
+    console.error("/trial/reset error:", e);
+    return res.status(500).json({
+      ok: false,
+      message: e.message || "server error"
+    });
+  }
+});
+
 // ── フリマ管理アシスト用ライセンス認証 ──────────────────────
 app.post("/verify-kanri", async (req, res) => {
   try {
