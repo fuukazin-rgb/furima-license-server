@@ -4,6 +4,7 @@ import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import { fileURLToPath } from "url";
+import { Resend } from "resend";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -15,6 +16,7 @@ const TRIAL_DAYS = Number(process.env.TRIAL_DAYS || 7);
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
 
 const LICENSES_FILE = path.join(__dirname, "licenses.json");
 
@@ -23,6 +25,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
 app.use(cors());
 app.use(express.json());
@@ -36,19 +39,20 @@ function readLicensesFile() {
     if (!fs.existsSync(LICENSES_FILE)) {
       return { licenses: [] };
     }
-
     const raw = fs.readFileSync(LICENSES_FILE, "utf8");
     const parsed = JSON.parse(raw);
-
     if (!parsed || !Array.isArray(parsed.licenses)) {
       return { licenses: [] };
     }
-
     return parsed;
   } catch (e) {
     console.error("readLicensesFile error:", e);
     return { licenses: [] };
   }
+}
+
+function writeLicensesFile(data) {
+  fs.writeFileSync(LICENSES_FILE, JSON.stringify(data, null, 2), "utf8");
 }
 
 function findLicenseIndex(licensesData, licenseKey) {
@@ -71,14 +75,10 @@ function buildTrialResponse(record) {
   const now = nowMs();
   const diff = Number(record.end_at) - now;
   const valid = diff > 0;
-
   const totalMinutes = Math.max(0, Math.floor(diff / (1000 * 60)));
   const remainingDays = Math.floor(totalMinutes / (24 * 60));
-  const remainingHours = Math.floor(
-    (totalMinutes % (24 * 60)) / 60
-  );
+  const remainingHours = Math.floor((totalMinutes % (24 * 60)) / 60);
   const remainingMinutes = totalMinutes % 60;
-
   return {
     ok: true,
     valid,
@@ -93,9 +93,87 @@ function buildTrialResponse(record) {
   };
 }
 
+// ── メール送信 ──────────────────────────────────────────────────
+async function sendLicenseEmail(buyerEmail, licenseKey, plan, productName) {
+  if (!resend) {
+    console.warn("Resend未設定のためメール送信スキップ");
+    return;
+  }
+
+  const planLabel = plan === "year" ? "年額プラン" : "月額プラン";
+
+  const html = `
+<!DOCTYPE html>
+<html lang="ja">
+<head><meta charset="UTF-8"></head>
+<body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#333;">
+  <h2 style="color:#4a90e2;">【fuukazin】ライセンスキーのご案内</h2>
+  <p>この度は <strong>${productName}（${planLabel}）</strong> をご購入いただき、誠にありがとうございます。</p>
+  <p>以下のライセンスキーを拡張機能の認証画面に入力してください。</p>
+  <div style="background:#f5f5f5;border:2px solid #4a90e2;border-radius:8px;padding:20px;text-align:center;margin:20px 0;">
+    <p style="font-size:13px;color:#666;margin:0 0 8px;">ライセンスキー</p>
+    <p style="font-size:22px;font-weight:bold;letter-spacing:2px;color:#222;margin:0;">${licenseKey}</p>
+  </div>
+  <h3>ご利用方法</h3>
+  <ol>
+    <li>Chrome拡張機能のアイコンをクリック</li>
+    <li>「ライセンスキーを入力」欄に上記キーを貼り付け</li>
+    <li>「認証」ボタンを押して完了</li>
+  </ol>
+  <p style="color:#e74c3c;font-size:13px;">※ このキーは1台の端末専用です。端末を変更する場合はサポートまでご連絡ください。</p>
+  <hr style="border:none;border-top:1px solid #eee;margin:20px 0;">
+  <p style="font-size:12px;color:#999;">ご不明な点はX（@niche_hobby）またはnote経由でお問い合わせください。</p>
+</body>
+</html>
+  `;
+
+  try {
+    await resend.emails.send({
+      from: "fuukazin <onboarding@resend.dev>",
+      to: buyerEmail,
+      subject: `【fuukazin】ライセンスキーをお届けします（${productName}）`,
+      html
+    });
+    console.log("✉️ メール送信完了:", buyerEmail);
+  } catch (e) {
+    console.error("メール送信失敗:", e.message);
+  }
+}
+
+async function sendCancelEmail(buyerEmail, licenseKey, productName) {
+  if (!resend) return;
+
+  const html = `
+<!DOCTYPE html>
+<html lang="ja">
+<head><meta charset="UTF-8"></head>
+<body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#333;">
+  <h2 style="color:#e74c3c;">【fuukazin】ご解約のご連絡</h2>
+  <p><strong>${productName}</strong> のご解約を承りました。</p>
+  <p>ライセンスキー <strong>${licenseKey}</strong> は無効化されました。</p>
+  <p>またのご利用をお待ちしております。</p>
+  <hr style="border:none;border-top:1px solid #eee;margin:20px 0;">
+  <p style="font-size:12px;color:#999;">ご不明な点はX（@niche_hobby）またはnote経由でお問い合わせください。</p>
+</body>
+</html>
+  `;
+
+  try {
+    await resend.emails.send({
+      from: "fuukazin <onboarding@resend.dev>",
+      to: buyerEmail,
+      subject: `【fuukazin】ご解約を承りました（${productName}）`,
+      html
+    });
+    console.log("✉️ 解約メール送信完了:", buyerEmail);
+  } catch (e) {
+    console.error("解約メール送信失敗:", e.message);
+  }
+}
+
+// ── ライセンス認証 ──────────────────────────────────────────────
 async function getTrialByFingerprint(fingerprint) {
   if (!fingerprint) return null;
-
   const { data, error } = await supabase
     .from("trials")
     .select("*")
@@ -103,17 +181,12 @@ async function getTrialByFingerprint(fingerprint) {
     .order("id", { ascending: true })
     .limit(1)
     .maybeSingle();
-
-  if (error) {
-    throw error;
-  }
-
+  if (error) throw error;
   return data;
 }
 
 async function getTrialByDeviceId(deviceId) {
   if (!deviceId) return null;
-
   const { data, error } = await supabase
     .from("trials")
     .select("*")
@@ -121,116 +194,77 @@ async function getTrialByDeviceId(deviceId) {
     .order("id", { ascending: true })
     .limit(1)
     .maybeSingle();
-
-  if (error) {
-    throw error;
-  }
-
+  if (error) throw error;
   return data;
 }
 
 async function updateTrialIdentity(id, fingerprint, deviceId) {
   const payload = {};
-
-  if (fingerprint) {
-    payload.fingerprint = fingerprint;
-  }
-
-  if (deviceId) {
-    payload.first_device_id = deviceId;
-  }
-
+  if (fingerprint) payload.fingerprint = fingerprint;
+  if (deviceId) payload.first_device_id = deviceId;
   const { data, error } = await supabase
     .from("trials")
     .update(payload)
     .eq("id", id)
     .select("*")
     .single();
-
-  if (error) {
-    throw error;
-  }
-
+  if (error) throw error;
   return data;
 }
 
 async function createTrial(fingerprint, deviceId) {
   const startAt = nowMs();
   const endAt = startAt + TRIAL_DAYS * 24 * 60 * 60 * 1000;
-
   const payload = {
     fingerprint,
     first_device_id: deviceId || null,
     start_at: startAt,
     end_at: endAt
   };
-
   const { data, error } = await supabase
     .from("trials")
     .insert(payload)
     .select("*")
     .single();
-
-  if (error) {
-    throw error;
-  }
-
+  if (error) throw error;
   return data;
 }
 
 async function getExistingTrial(fingerprint, deviceId) {
   const byFingerprint = await getTrialByFingerprint(fingerprint);
   if (byFingerprint) {
-    if (
-      deviceId &&
-      String(byFingerprint.first_device_id || "").trim() !== deviceId
-    ) {
+    if (deviceId && String(byFingerprint.first_device_id || "").trim() !== deviceId) {
       try {
         return await updateTrialIdentity(byFingerprint.id, fingerprint, deviceId);
       } catch (e) {
-        console.error("updateTrialIdentity(byFingerprint) error:", e);
         return byFingerprint;
       }
     }
-
     return byFingerprint;
   }
-
   const byDeviceId = await getTrialByDeviceId(deviceId);
   if (byDeviceId) {
-    if (
-      fingerprint &&
-      String(byDeviceId.fingerprint || "").trim() !== fingerprint
-    ) {
+    if (fingerprint && String(byDeviceId.fingerprint || "").trim() !== fingerprint) {
       try {
         return await updateTrialIdentity(byDeviceId.id, fingerprint, deviceId);
       } catch (e) {
-        console.error("updateTrialIdentity(byDeviceId) error:", e);
         return byDeviceId;
       }
     }
-
     return byDeviceId;
   }
-
   return null;
 }
 
 async function getOrCreateTrial(fingerprint, deviceId) {
   let record = await getExistingTrial(fingerprint, deviceId);
-
-  if (record) {
-    return record;
-  }
-
+  if (record) return record;
   try {
     record = await createTrial(fingerprint, deviceId);
     return record;
   } catch (e) {
     const retry = await getExistingTrial(fingerprint, deviceId);
-    if (retry) {
-      return retry;
-    }
+    if (retry) return retry;
     throw e;
   }
 }
@@ -241,17 +275,12 @@ async function getBindingByLicenseKey(licenseKey) {
     .select("*")
     .eq("license_key", licenseKey)
     .maybeSingle();
-
-  if (error) {
-    throw error;
-  }
-
+  if (error) throw error;
   return data;
 }
 
 async function createBinding({ licenseKey, deviceId, plan, status }) {
   const now = nowMs();
-
   const payload = {
     license_key: licenseKey,
     device_id: deviceId,
@@ -260,83 +289,42 @@ async function createBinding({ licenseKey, deviceId, plan, status }) {
     first_verified_at: now,
     last_verified_at: now
   };
-
   const { data, error } = await supabase
     .from("license_bindings")
     .insert(payload)
     .select("*")
     .single();
-
-  if (error) {
-    throw error;
-  }
-
+  if (error) throw error;
   return data;
 }
 
 async function touchBinding(id) {
   const now = nowMs();
-
   const { data, error } = await supabase
     .from("license_bindings")
     .update({ last_verified_at: now })
     .eq("id", id)
     .select("*")
     .single();
-
-  if (error) {
-    throw error;
-  }
-
+  if (error) throw error;
   return data;
 }
 
 async function verifyLicenseFromStorage(licenseKey, deviceId) {
   const licensesData = readLicensesFile();
   const index = findLicenseIndex(licensesData, licenseKey);
-
-  if (index === -1) {
-    return {
-      valid: false,
-      message: "ライセンスキーが見つかりません"
-    };
-  }
-
+  if (index === -1) return { valid: false, message: "ライセンスキーが見つかりません" };
   const current = normalizeLicenseItem(licensesData.licenses[index]);
-
-  if (!current.licenseKey) {
-    return {
-      valid: false,
-      message: "ライセンスキーが不正です"
-    };
-  }
-
-  if (current.status !== "active") {
-    return {
-      valid: false,
-      message: "このライセンスキーは無効です"
-    };
-  }
-
-  if (!deviceId) {
-    return {
-      valid: false,
-      message: "deviceId is required"
-    };
-  }
+  if (!current.licenseKey) return { valid: false, message: "ライセンスキーが不正です" };
+  if (current.status !== "active") return { valid: false, message: "このライセンスキーは無効です" };
+  if (!deviceId) return { valid: false, message: "deviceId is required" };
 
   let binding = await getBindingByLicenseKey(current.licenseKey);
-
   if (binding) {
     if (String(binding.device_id || "").trim() !== deviceId) {
-      return {
-        valid: false,
-        message: "このライセンスキーは別の端末で使用中です"
-      };
+      return { valid: false, message: "このライセンスキーは別の端末で使用中です" };
     }
-
     const touched = await touchBinding(binding.id);
-
     return {
       valid: true,
       message: "ライセンス認証が完了しました",
@@ -348,19 +336,14 @@ async function verifyLicenseFromStorage(licenseKey, deviceId) {
 
   if (current.boundDeviceId) {
     if (current.boundDeviceId !== deviceId) {
-      return {
-        valid: false,
-        message: "このライセンスキーは別の端末で使用中です"
-      };
+      return { valid: false, message: "このライセンスキーは別の端末で使用中です" };
     }
-
     binding = await createBinding({
       licenseKey: current.licenseKey,
       deviceId: current.boundDeviceId,
       plan: current.plan || "unknown",
       status: current.status || "active"
     });
-
     return {
       valid: true,
       message: "ライセンス認証が完了しました",
@@ -377,7 +360,6 @@ async function verifyLicenseFromStorage(licenseKey, deviceId) {
     plan: current.plan || "unknown",
     status: current.status || "active"
   });
-
   return {
     valid: true,
     message: "ライセンス認証が完了しました",
@@ -387,226 +369,103 @@ async function verifyLicenseFromStorage(licenseKey, deviceId) {
   };
 }
 
+// ── ルート ──────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   res.json({
     ok: true,
     service: "furima-license-server",
     storage: "supabase(trials + license_bindings) + licenses.json(master)",
     trialDays: TRIAL_DAYS,
-    hasSupabase: Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
+    hasSupabase: Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY),
+    hasResend: Boolean(RESEND_API_KEY)
   });
 });
 
 app.post("/verify", async (req, res) => {
   try {
     const { licenseKey, deviceId } = req.body || {};
-
-    if (!licenseKey) {
-      return res.status(400).json({
-        valid: false,
-        message: "licenseKey is required"
-      });
-    }
-
-    if (!deviceId) {
-      return res.status(400).json({
-        valid: false,
-        message: "deviceId is required"
-      });
-    }
-
+    if (!licenseKey) return res.status(400).json({ valid: false, message: "licenseKey is required" });
+    if (!deviceId) return res.status(400).json({ valid: false, message: "deviceId is required" });
     const result = await verifyLicenseFromStorage(licenseKey, deviceId);
     return res.json(result);
   } catch (e) {
     console.error("/verify error:", e);
+    return res.status(500).json({ valid: false, message: e.message || "server error" });
+  }
+});
 
-    return res.status(500).json({
-      valid: false,
-      message: e.message || "server error"
-    });
+app.post("/verify-kanri", async (req, res) => {
+  try {
+    const { licenseKey, deviceId } = req.body || {};
+    if (!licenseKey) return res.status(400).json({ valid: false, message: "licenseKey is required" });
+    if (!deviceId) return res.status(400).json({ valid: false, message: "deviceId is required" });
+    if (!String(licenseKey).startsWith("FKA-")) {
+      return res.status(400).json({ valid: false, message: "無効なライセンスキーです（FKA-で始まるキーを入力してください）" });
+    }
+    const result = await verifyLicenseFromStorage(licenseKey, deviceId);
+    return res.json(result);
+  } catch (e) {
+    console.error("/verify-kanri error:", e);
+    return res.status(500).json({ valid: false, message: e.message || "server error" });
   }
 });
 
 app.post("/trial/start", async (req, res) => {
   try {
     const { fingerprint, deviceId } = req.body || {};
-
     if (!fingerprint && !deviceId) {
-      return res.status(400).json({
-        ok: false,
-        valid: false,
-        message: "fingerprint or deviceId is required"
-      });
+      return res.status(400).json({ ok: false, valid: false, message: "fingerprint or deviceId is required" });
     }
-
     const record = await getOrCreateTrial(fingerprint, deviceId);
-
-    console.log("trial/start", {
-      fingerprint: fingerprint || null,
-      deviceId: deviceId || null,
-      startAt: record.start_at,
-      endAt: record.end_at
-    });
-
     return res.json(buildTrialResponse(record));
   } catch (e) {
     console.error("/trial/start error:", e);
-
-    return res.status(500).json({
-      ok: false,
-      valid: false,
-      message: e.message || "server error"
-    });
+    return res.status(500).json({ ok: false, valid: false, message: e.message || "server error" });
   }
 });
 
 app.post("/trial/status", async (req, res) => {
   try {
     const { fingerprint, deviceId } = req.body || {};
-
     if (!fingerprint && !deviceId) {
-      return res.status(400).json({
-        ok: false,
-        valid: false,
-        message: "fingerprint or deviceId is required"
-      });
+      return res.status(400).json({ ok: false, valid: false, message: "fingerprint or deviceId is required" });
     }
-
     const record = await getExistingTrial(fingerprint, deviceId);
-
     if (!record) {
-      return res.json({
-        ok: true,
-        valid: false,
-        notFound: true,
-        remainingDays: 0,
-        remainingHours: 0,
-        remainingMinutes: 0,
-        remainingText: null
-      });
+      return res.json({ ok: true, valid: false, notFound: true, remainingDays: 0, remainingHours: 0, remainingMinutes: 0, remainingText: null });
     }
-
     return res.json(buildTrialResponse(record));
   } catch (e) {
     console.error("/trial/status error:", e);
-
-    return res.status(500).json({
-      ok: false,
-      valid: false,
-      message: e.message || "server error"
-    });
+    return res.status(500).json({ ok: false, valid: false, message: e.message || "server error" });
   }
 });
 
-// ═══════════════════════════════════════════════════════════════
-//  /trial/reset
-//  開発・サポート用: 指定deviceIdのトライアルをリセット（削除）する
-//  削除後に /trial/start を呼べば新しいトライアルが始まる
-// ═══════════════════════════════════════════════════════════════
 app.post("/trial/reset", async (req, res) => {
   try {
     const { deviceId, fingerprint } = req.body || {};
-
     if (!deviceId && !fingerprint) {
-      return res.status(400).json({
-        ok: false,
-        message: "deviceId or fingerprint is required"
-      });
+      return res.status(400).json({ ok: false, message: "deviceId or fingerprint is required" });
     }
-
     let deletedCount = 0;
-
-    // deviceIdで削除
     if (deviceId) {
-      const { error, count } = await supabase
-        .from("trials")
-        .delete()
-        .eq("first_device_id", deviceId);
-
-      if (error) {
-        console.error("/trial/reset delete by deviceId error:", error);
-        throw error;
-      }
+      const { error, count } = await supabase.from("trials").delete().eq("first_device_id", deviceId);
+      if (error) throw error;
       deletedCount += (count || 0);
     }
-
-    // fingerprintで削除
     if (fingerprint) {
-      const { error, count } = await supabase
-        .from("trials")
-        .delete()
-        .eq("fingerprint", fingerprint);
-
-      if (error) {
-        console.error("/trial/reset delete by fingerprint error:", error);
-        throw error;
-      }
+      const { error, count } = await supabase.from("trials").delete().eq("fingerprint", fingerprint);
+      if (error) throw error;
       deletedCount += (count || 0);
     }
-
-    console.log("trial/reset", { deviceId, fingerprint, deletedCount });
-
-    return res.json({
-      ok: true,
-      message: "トライアルをリセットしました。再度 /trial/start を呼んでください。",
-      deletedCount
-    });
+    return res.json({ ok: true, message: "トライアルをリセットしました。再度 /trial/start を呼んでください。", deletedCount });
   } catch (e) {
     console.error("/trial/reset error:", e);
-    return res.status(500).json({
-      ok: false,
-      message: e.message || "server error"
-    });
+    return res.status(500).json({ ok: false, message: e.message || "server error" });
   }
 });
 
-// ── フリマ管理アシスト用ライセンス認証 ──────────────────────
-app.post("/verify-kanri", async (req, res) => {
-  try {
-    const { licenseKey, deviceId } = req.body || {};
-
-    if (!licenseKey) {
-      return res.status(400).json({
-        valid: false,
-        message: "licenseKey is required"
-      });
-    }
-
-    if (!deviceId) {
-      return res.status(400).json({
-        valid: false,
-        message: "deviceId is required"
-      });
-    }
-
-    // FKA- プレフィックスチェック
-    if (!String(licenseKey).startsWith("FKA-")) {
-      return res.status(400).json({
-        valid: false,
-        message: "無効なライセンスキーです（FKA-で始まるキーを入力してください）"
-      });
-    }
-
-    const result = await verifyLicenseFromStorage(licenseKey, deviceId);
-    return res.json(result);
-  } catch (e) {
-    console.error("/verify-kanri error:", e);
-    return res.status(500).json({
-      valid: false,
-      message: e.message || "server error"
-    });
-  }
-});
-
-// ═══════════════════════════════════════════════════════════════
-//  Gumroad Webhook
-//  購入 → キー自動発行
-//  キャンセル・返金 → キー即無効化
-// ═══════════════════════════════════════════════════════════════
-
-const GUMROAD_SECRET = process.env.GUMROAD_WEBHOOK_SECRET || "";
-
-// ランダムなライセンスキー生成
+// ── Gumroad Webhook（購入→キー発行→メール自動送信、キャンセル→即無効化） ──
 function generateLicenseKey(prefix) {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   const seg = () => Array.from({ length: 4 }, () =>
@@ -615,48 +474,41 @@ function generateLicenseKey(prefix) {
   return `${prefix}-${seg()}-${seg()}-${seg()}`;
 }
 
-// licenses.jsonに書き込む
-function writeLicensesFile(data) {
-  fs.writeFileSync(LICENSES_FILE, JSON.stringify(data, null, 2), "utf8");
-}
-
-// プロダクトIDからプレフィックスを判定
 function getPrefixFromProductId(productId) {
-  const PRODUCT_MAP = {
-    // Gumroadの商品IDを設定（後で変更可能）
-    "furima_kanri_month": "FKA",
-    "furima_kanri_year":  "FKA",
-    "furima_pro_month":   "FRP",
-    "furima_pro_year":    "FRP",
-  };
-  return PRODUCT_MAP[productId] || "FKA";
+  const id = String(productId).toLowerCase();
+  if (id.includes("kanri") || id.includes("fka")) return "FKA";
+  return "FRP";
 }
 
-// プランを判定
 function getPlanFromProductId(productId) {
-  if (String(productId).includes("year")) return "year";
+  if (String(productId).toLowerCase().includes("year")) return "year";
   return "month";
+}
+
+function getProductNameFromProductId(productId) {
+  const id = String(productId).toLowerCase();
+  if (id.includes("kanri") || id.includes("fka")) return "フリマ管理アシスト";
+  return "フリマ出品アシスト Pro";
 }
 
 app.post("/webhook/gumroad", async (req, res) => {
   try {
     const body = req.body || {};
-
-    // Gumroadのwebhookデータ
-    const resourceName   = body.resource_name   || ""; // "sale" or "cancellation" or "refund"
-    const productId      = body.product_id       || body.short_product_id || "";
-    const buyerEmail     = body.email            || "";
-    const saleId         = body.sale_id          || body.id || "";
-    const refunded       = body.refunded         === true || body.refunded === "true";
-    const chargebacked   = body.chargebacked      === true || body.chargebacked === "true";
+    const resourceName = body.resource_name || "";
+    const productId    = body.product_id || body.short_product_id || "";
+    const buyerEmail   = body.email || "";
+    const saleId       = body.sale_id || body.id || "";
+    const refunded     = body.refunded === true || body.refunded === "true";
+    const chargebacked = body.chargebacked === true || body.chargebacked === "true";
 
     console.log("Gumroad webhook:", { resourceName, productId, buyerEmail, saleId, refunded });
 
-    // ── 購入時: キーを自動発行 ──
+    // ── 購入時: キー自動発行 → メール自動送信 ──
     if (resourceName === "sale" && !refunded && !chargebacked) {
-      const prefix     = getPrefixFromProductId(productId);
-      const plan       = getPlanFromProductId(productId);
-      const licenseKey = generateLicenseKey(prefix);
+      const prefix      = getPrefixFromProductId(productId);
+      const plan        = getPlanFromProductId(productId);
+      const productName = getProductNameFromProductId(productId);
+      const licenseKey  = generateLicenseKey(prefix);
 
       const licensesData = readLicensesFile();
       licensesData.licenses.push({
@@ -669,27 +521,29 @@ app.post("/webhook/gumroad", async (req, res) => {
         createdAt:     new Date().toISOString()
       });
       writeLicensesFile(licensesData);
-
       console.log("✅ キー発行:", licenseKey, buyerEmail);
 
-      // Supabaseにも記録
+      // Supabaseに記録
       try {
         await supabase.from("license_issues").insert({
-          license_key:  licenseKey,
-          buyer_email:  buyerEmail,
-          sale_id:      saleId,
+          license_key: licenseKey,
+          buyer_email: buyerEmail,
+          sale_id:     saleId,
           plan,
-          status:       "active",
-          created_at:   Date.now()
+          status:      "active",
+          created_at:  Date.now()
         });
-      } catch(e) {
+      } catch (e) {
         console.warn("Supabase記録失敗（無視）:", e.message);
       }
+
+      // メール自動送信
+      await sendLicenseEmail(buyerEmail, licenseKey, plan, productName);
 
       return res.json({ ok: true, action: "issued", licenseKey });
     }
 
-    // ── キャンセル・返金時: キーを即無効化 ──
+    // ── キャンセル・返金時: キー即無効化 → メール通知 ──
     if (
       resourceName === "cancellation" ||
       resourceName === "refund" ||
@@ -697,36 +551,43 @@ app.post("/webhook/gumroad", async (req, res) => {
       chargebacked
     ) {
       const licensesData = readLicensesFile();
-      let cancelled = 0;
+      let cancelledKey = "";
+      let cancelledEmail = buyerEmail;
+      let cancelledProductId = productId;
 
       licensesData.licenses = licensesData.licenses.map(item => {
-        if (String(item.saleId || "") === String(saleId) ||
-            String(item.buyerEmail || "").toLowerCase() === buyerEmail.toLowerCase()) {
-          cancelled++;
+        if (
+          String(item.saleId || "") === String(saleId) ||
+          String(item.buyerEmail || "").toLowerCase() === buyerEmail.toLowerCase()
+        ) {
+          cancelledKey = item.licenseKey;
+          cancelledEmail = item.buyerEmail || buyerEmail;
+          cancelledProductId = item.productId || productId;
           console.log("🚫 キー無効化:", item.licenseKey, buyerEmail);
           return { ...item, status: "cancelled", cancelledAt: new Date().toISOString() };
         }
         return item;
       });
-
       writeLicensesFile(licensesData);
 
       // Supabaseのbindingも無効化
       if (saleId) {
         try {
-          await supabase
-            .from("license_bindings")
-            .update({ status: "cancelled" })
-            .eq("sale_id", saleId);
-        } catch(e) {
+          await supabase.from("license_bindings").update({ status: "cancelled" }).eq("sale_id", saleId);
+        } catch (e) {
           console.warn("Supabase無効化失敗（無視）:", e.message);
         }
       }
 
-      return res.json({ ok: true, action: "cancelled", count: cancelled });
+      // 解約メール送信
+      if (cancelledKey && cancelledEmail) {
+        const productName = getProductNameFromProductId(cancelledProductId);
+        await sendCancelEmail(cancelledEmail, cancelledKey, productName);
+      }
+
+      return res.json({ ok: true, action: "cancelled" });
     }
 
-    // その他のイベントは無視
     return res.json({ ok: true, action: "ignored", resourceName });
 
   } catch (e) {
