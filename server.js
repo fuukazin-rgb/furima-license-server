@@ -488,6 +488,17 @@ function getPlanFromProductId(productId) {
   return "month";
 }
 
+// Gumroadの recurrence（"monthly" / "yearly"）からプランを判定（最優先）
+function getPlanFromBody(body) {
+  const rec = String(body.recurrence || "").toLowerCase();
+  if (rec === "yearly" || rec === "annually" || rec === "year") return "year";
+  if (rec === "monthly" || rec === "month") return "month";
+  // recurrence が無い場合は product_id から推測
+  return getPlanFromProductId(
+    body.product_id || body.short_product_id || body.product_permalink || ""
+  );
+}
+
 function getProductNameFromProductId(productId) {
   const id = String(productId).toLowerCase();
   if (id.includes("kanri") || id.includes("fka")) return "フリマ管理アシスト";
@@ -510,14 +521,34 @@ app.post("/webhook/gumroad", async (req, res) => {
     const saleId         = body.sale_id          || body.id || body.order_number || "";
     const refunded       = body.refunded         === true || body.refunded === "true";
     const chargebacked   = body.chargebacked      === true || body.chargebacked === "true";
+    const disputed       = body.disputed         === true || body.disputed === "true";
+    const cancelled      = body.cancelled        === true || body.cancelled === "true";
+    // GumroadのPingには resource_name が無い。購入か解約かは下記フラグで判定する。
+    const isCancelEvent  = refunded || chargebacked || disputed || cancelled;
+    // テストPing（"test":"true"）かどうか。テスト時は実際の発行・メール送信をスキップ
+    const isTest         = body.test === true || body.test === "true";
 
-    console.log("Gumroad webhook parsed:", { resourceName, productId, buyerEmail, saleId, refunded });
+    console.log("Gumroad webhook parsed:", { resourceName, productId, buyerEmail, saleId, refunded, isCancelEvent, isTest });
 
     // ── 購入時: キー自動発行 → メール自動送信 ──
-    if (resourceName === "sale" && !refunded && !chargebacked) {
+    // 判定: sale_id があり、返金・キャンセル系フラグが立っていなければ「購入」とみなす
+    //       （resource_name が "cancellation"/"refund" の場合は除外）
+    const isSaleEvent = Boolean(saleId)
+      && !isCancelEvent
+      && resourceName !== "cancellation"
+      && resourceName !== "refund";
+
+    if (isSaleEvent) {
       const prefix      = getPrefixFromProductId(productId);
-      const plan        = getPlanFromProductId(productId);
+      const plan        = getPlanFromBody(body);
       const productName = getProductNameFromProductId(productId);
+
+      // テストPingのときは、判定が正しいことだけ確認して実際の発行はしない
+      if (isTest) {
+        console.log("🧪 テストPing検知: 実発行はスキップします。判定結果 →", { prefix, plan, productName, buyerEmail });
+        return res.json({ ok: true, action: "test_ok", would_issue: { prefix, plan, productName, buyerEmail } });
+      }
+
       const licenseKey  = generateLicenseKey(prefix);
 
       const licensesData = readLicensesFile();
@@ -557,8 +588,7 @@ app.post("/webhook/gumroad", async (req, res) => {
     if (
       resourceName === "cancellation" ||
       resourceName === "refund" ||
-      refunded ||
-      chargebacked
+      isCancelEvent
     ) {
       const licensesData = readLicensesFile();
       let cancelledKey = "";
