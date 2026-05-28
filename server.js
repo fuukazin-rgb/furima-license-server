@@ -26,6 +26,8 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 app.use(cors());
 app.use(express.json());
+// ★Gumroadのwebhook(Ping)は application/x-www-form-urlencoded で届くため必須
+app.use(express.urlencoded({ extended: true }));
 
 function nowMs() {
   return Date.now();
@@ -498,6 +500,68 @@ app.post("/trial/status", async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════
+//  /trial/reset
+//  開発・サポート用: 指定deviceIdのトライアルをリセット（削除）する
+//  削除後に /trial/start を呼べば新しいトライアルが始まる
+// ═══════════════════════════════════════════════════════════════
+app.post("/trial/reset", async (req, res) => {
+  try {
+    const { deviceId, fingerprint } = req.body || {};
+
+    if (!deviceId && !fingerprint) {
+      return res.status(400).json({
+        ok: false,
+        message: "deviceId or fingerprint is required"
+      });
+    }
+
+    let deletedCount = 0;
+
+    // deviceIdで削除
+    if (deviceId) {
+      const { error, count } = await supabase
+        .from("trials")
+        .delete()
+        .eq("first_device_id", deviceId);
+
+      if (error) {
+        console.error("/trial/reset delete by deviceId error:", error);
+        throw error;
+      }
+      deletedCount += (count || 0);
+    }
+
+    // fingerprintで削除
+    if (fingerprint) {
+      const { error, count } = await supabase
+        .from("trials")
+        .delete()
+        .eq("fingerprint", fingerprint);
+
+      if (error) {
+        console.error("/trial/reset delete by fingerprint error:", error);
+        throw error;
+      }
+      deletedCount += (count || 0);
+    }
+
+    console.log("trial/reset", { deviceId, fingerprint, deletedCount });
+
+    return res.json({
+      ok: true,
+      message: "トライアルをリセットしました。再度 /trial/start を呼んでください。",
+      deletedCount
+    });
+  } catch (e) {
+    console.error("/trial/reset error:", e);
+    return res.status(500).json({
+      ok: false,
+      message: e.message || "server error"
+    });
+  }
+});
+
 // ── フリマ管理アシスト用ライセンス認証 ──────────────────────
 app.post("/verify-kanri", async (req, res) => {
   try {
@@ -580,15 +644,20 @@ app.post("/webhook/gumroad", async (req, res) => {
   try {
     const body = req.body || {};
 
-    // Gumroadのwebhookデータ
-    const resourceName   = body.resource_name   || ""; // "sale" or "cancellation" or "refund"
-    const productId      = body.product_id       || body.short_product_id || "";
-    const buyerEmail     = body.email            || "";
-    const saleId         = body.sale_id          || body.id || "";
+    // ★生データを丸ごとログ出力（Gumroadが実際に送ってくるキー名・階層を確認するため）
+    console.log("=== Gumroad webhook RAW body ===");
+    console.log(JSON.stringify(body, null, 2));
+    console.log("=== Content-Type:", req.headers["content-type"], "===");
+
+    // Gumroadのwebhookデータ（キー名のゆれに備えて複数候補を見る）
+    const resourceName   = body.resource_name   || body.resourceName   || ""; // "sale" or "cancellation" or "refund"
+    const productId      = body.product_id       || body.short_product_id || body.product_permalink || body.permalink || "";
+    const buyerEmail     = body.email            || body.purchaser_email || body.buyer_email || "";
+    const saleId         = body.sale_id          || body.id || body.order_number || "";
     const refunded       = body.refunded         === true || body.refunded === "true";
     const chargebacked   = body.chargebacked      === true || body.chargebacked === "true";
 
-    console.log("Gumroad webhook:", { resourceName, productId, buyerEmail, saleId, refunded });
+    console.log("Gumroad webhook parsed:", { resourceName, productId, buyerEmail, saleId, refunded });
 
     // ── 購入時: キーを自動発行 ──
     if (resourceName === "sale" && !refunded && !chargebacked) {
