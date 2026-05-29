@@ -1,13 +1,7 @@
-import fs from "fs";
-import path from "path";
 import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
-import { fileURLToPath } from "url";
 import { Resend } from "resend";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const app = express();
 
@@ -17,8 +11,6 @@ const TRIAL_DAYS = Number(process.env.TRIAL_DAYS || 7);
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
-
-const LICENSES_FILE = path.join(__dirname, "licenses.json");
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error("Missing Supabase environment variables");
@@ -34,43 +26,6 @@ app.use(express.urlencoded({ extended: true }));
 
 function nowMs() {
   return Date.now();
-}
-
-function readLicensesFile() {
-  try {
-    if (!fs.existsSync(LICENSES_FILE)) {
-      return { licenses: [] };
-    }
-    const raw = fs.readFileSync(LICENSES_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed || !Array.isArray(parsed.licenses)) {
-      return { licenses: [] };
-    }
-    return parsed;
-  } catch (e) {
-    console.error("readLicensesFile error:", e);
-    return { licenses: [] };
-  }
-}
-
-function writeLicensesFile(data) {
-  fs.writeFileSync(LICENSES_FILE, JSON.stringify(data, null, 2), "utf8");
-}
-
-function findLicenseIndex(licensesData, licenseKey) {
-  return licensesData.licenses.findIndex(
-    (item) =>
-      String(item.licenseKey || "").trim() === String(licenseKey || "").trim()
-  );
-}
-
-function normalizeLicenseItem(item) {
-  return {
-    licenseKey: String(item.licenseKey || "").trim(),
-    status: String(item.status || "").trim().toLowerCase(),
-    plan: String(item.plan || "").trim().toLowerCase(),
-    boundDeviceId: String(item.boundDeviceId || "").trim()
-  };
 }
 
 function buildTrialResponse(record) {
@@ -173,7 +128,64 @@ async function sendCancelEmail(buyerEmail, licenseKey, productName) {
   }
 }
 
-// ── ライセンス認証 ──────────────────────────────────────────────
+// ── licenses テーブル操作（旧 licenses.json の置き換え） ──────────
+async function getLicenseByKey(licenseKey) {
+  const key = String(licenseKey || "").trim();
+  if (!key) return null;
+  const { data, error } = await supabase
+    .from("licenses")
+    .select("*")
+    .eq("license_key", key)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+async function insertLicense({ licenseKey, status, plan, buyerEmail, saleId, productId }) {
+  const payload = {
+    license_key:     licenseKey,
+    status:          status || "active",
+    plan:            plan || "unknown",
+    bound_device_id: "",
+    buyer_email:     buyerEmail || null,
+    sale_id:         saleId || null,
+    product_id:      productId || null
+  };
+  const { data, error } = await supabase
+    .from("licenses")
+    .insert(payload)
+    .select("*")
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+async function cancelLicensesBySaleOrEmail(saleId, buyerEmail) {
+  const conditions = [];
+  if (saleId) conditions.push(`sale_id.eq.${saleId}`);
+  if (buyerEmail) conditions.push(`buyer_email.ilike.${buyerEmail}`);
+  if (conditions.length === 0) return [];
+
+  // active なものだけ対象に検索
+  const { data: matches, error: findError } = await supabase
+    .from("licenses")
+    .select("*")
+    .eq("status", "active")
+    .or(conditions.join(","));
+  if (findError) throw findError;
+  if (!matches || matches.length === 0) return [];
+
+  const keys = matches.map(m => m.license_key);
+  const { data: updated, error: updateError } = await supabase
+    .from("licenses")
+    .update({ status: "cancelled", cancelled_at: new Date().toISOString() })
+    .in("license_key", keys)
+    .select("*");
+  if (updateError) throw updateError;
+  return updated || [];
+}
+
+// ── trials テーブル ─────────────────────────────────────────────
 async function getTrialByFingerprint(fingerprint) {
   if (!fingerprint) return null;
   const { data, error } = await supabase
@@ -271,6 +283,7 @@ async function getOrCreateTrial(fingerprint, deviceId) {
   }
 }
 
+// ── license_bindings テーブル ───────────────────────────────────
 async function getBindingByLicenseKey(licenseKey) {
   const { data, error } = await supabase
     .from("license_bindings")
@@ -312,16 +325,19 @@ async function touchBinding(id) {
   return data;
 }
 
+// ── ライセンス認証ロジック ──────────────────────────────────────
 async function verifyLicenseFromStorage(licenseKey, deviceId) {
-  const licensesData = readLicensesFile();
-  const index = findLicenseIndex(licensesData, licenseKey);
-  if (index === -1) return { valid: false, message: "ライセンスキーが見つかりません" };
-  const current = normalizeLicenseItem(licensesData.licenses[index]);
-  if (!current.licenseKey) return { valid: false, message: "ライセンスキーが不正です" };
-  if (current.status !== "active") return { valid: false, message: "このライセンスキーは無効です" };
+  const license = await getLicenseByKey(licenseKey);
+  if (!license) return { valid: false, message: "ライセンスキーが見つかりません" };
+
+  const status       = String(license.status || "").toLowerCase();
+  const planVal      = String(license.plan || "").toLowerCase() || "unknown";
+  const masterDevice = String(license.bound_device_id || "").trim();
+
+  if (status !== "active") return { valid: false, message: "このライセンスキーは無効です" };
   if (!deviceId) return { valid: false, message: "deviceId is required" };
 
-  let binding = await getBindingByLicenseKey(current.licenseKey);
+  let binding = await getBindingByLicenseKey(license.license_key);
   if (binding) {
     if (String(binding.device_id || "").trim() !== deviceId) {
       return { valid: false, message: "このライセンスキーは別の端末で使用中です" };
@@ -330,26 +346,26 @@ async function verifyLicenseFromStorage(licenseKey, deviceId) {
     return {
       valid: true,
       message: "ライセンス認証が完了しました",
-      plan: current.plan || "unknown",
+      plan: planVal,
       boundDeviceId: String(touched.device_id || "").trim(),
       newlyBound: false
     };
   }
 
-  if (current.boundDeviceId) {
-    if (current.boundDeviceId !== deviceId) {
+  if (masterDevice) {
+    if (masterDevice !== deviceId) {
       return { valid: false, message: "このライセンスキーは別の端末で使用中です" };
     }
     binding = await createBinding({
-      licenseKey: current.licenseKey,
-      deviceId: current.boundDeviceId,
-      plan: current.plan || "unknown",
-      status: current.status || "active"
+      licenseKey: license.license_key,
+      deviceId: masterDevice,
+      plan: planVal,
+      status
     });
     return {
       valid: true,
       message: "ライセンス認証が完了しました",
-      plan: current.plan || "unknown",
+      plan: planVal,
       boundDeviceId: String(binding.device_id || "").trim(),
       newlyBound: false,
       migratedFromJson: true
@@ -357,15 +373,15 @@ async function verifyLicenseFromStorage(licenseKey, deviceId) {
   }
 
   binding = await createBinding({
-    licenseKey: current.licenseKey,
+    licenseKey: license.license_key,
     deviceId,
-    plan: current.plan || "unknown",
-    status: current.status || "active"
+    plan: planVal,
+    status
   });
   return {
     valid: true,
     message: "ライセンス認証が完了しました",
-    plan: current.plan || "unknown",
+    plan: planVal,
     boundDeviceId: String(binding.device_id || "").trim(),
     newlyBound: true
   };
@@ -376,7 +392,7 @@ app.get("/", (req, res) => {
   res.json({
     ok: true,
     service: "furima-license-server",
-    storage: "supabase(trials + license_bindings) + licenses.json(master)",
+    storage: "supabase(licenses + trials + license_bindings)",
     trialDays: TRIAL_DAYS,
     hasSupabase: Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY),
     hasResend: Boolean(RESEND_API_KEY)
@@ -493,7 +509,6 @@ function getPlanFromBody(body) {
   const rec = String(body.recurrence || "").toLowerCase();
   if (rec === "yearly" || rec === "annually" || rec === "year") return "year";
   if (rec === "monthly" || rec === "month") return "month";
-  // recurrence が無い場合は product_id から推測
   return getPlanFromProductId(
     body.product_id || body.short_product_id || body.product_permalink || ""
   );
@@ -509,30 +524,24 @@ app.post("/webhook/gumroad", async (req, res) => {
   try {
     const body = req.body || {};
 
-    // ★生データを丸ごとログ出力（Gumroadが実際に送ってくるキー名・階層を確認するため）
     console.log("=== Gumroad webhook RAW body ===");
     console.log(JSON.stringify(body, null, 2));
     console.log("=== Content-Type:", req.headers["content-type"], "===");
 
-    // Gumroadのwebhookデータ（キー名のゆれに備えて複数候補を見る）
-    const resourceName   = body.resource_name   || body.resourceName   || ""; // "sale" or "cancellation" or "refund"
+    const resourceName   = body.resource_name   || body.resourceName   || "";
     const productId      = body.product_id       || body.short_product_id || body.product_permalink || body.permalink || "";
     const buyerEmail     = body.email            || body.purchaser_email || body.buyer_email || "";
     const saleId         = body.sale_id          || body.id || body.order_number || "";
     const refunded       = body.refunded         === true || body.refunded === "true";
-    const chargebacked   = body.chargebacked      === true || body.chargebacked === "true";
+    const chargebacked   = body.chargebacked     === true || body.chargebacked === "true";
     const disputed       = body.disputed         === true || body.disputed === "true";
     const cancelled      = body.cancelled        === true || body.cancelled === "true";
-    // GumroadのPingには resource_name が無い。購入か解約かは下記フラグで判定する。
     const isCancelEvent  = refunded || chargebacked || disputed || cancelled;
-    // テストPing（"test":"true"）かどうか。テスト時は実際の発行・メール送信をスキップ
     const isTest         = body.test === true || body.test === "true";
 
     console.log("Gumroad webhook parsed:", { resourceName, productId, buyerEmail, saleId, refunded, isCancelEvent, isTest });
 
     // ── 購入時: キー自動発行 → メール自動送信 ──
-    // 判定: sale_id があり、返金・キャンセル系フラグが立っていなければ「購入」とみなす
-    //       （resource_name が "cancellation"/"refund" の場合は除外）
     const isSaleEvent = Boolean(saleId)
       && !isCancelEvent
       && resourceName !== "cancellation"
@@ -543,42 +552,28 @@ app.post("/webhook/gumroad", async (req, res) => {
       const plan        = getPlanFromBody(body);
       const productName = getProductNameFromProductId(productId);
 
-      // テストPingのときは、判定が正しいことだけ確認して実際の発行はしない
       if (isTest) {
         console.log("🧪 テストPing検知: 実発行はスキップします。判定結果 →", { prefix, plan, productName, buyerEmail });
         return res.json({ ok: true, action: "test_ok", would_issue: { prefix, plan, productName, buyerEmail } });
       }
 
-      const licenseKey  = generateLicenseKey(prefix);
+      const licenseKey = generateLicenseKey(prefix);
 
-      const licensesData = readLicensesFile();
-      licensesData.licenses.push({
-        licenseKey,
-        status:        "active",
-        plan,
-        boundDeviceId: "",
-        buyerEmail,
-        saleId,
-        createdAt:     new Date().toISOString()
-      });
-      writeLicensesFile(licensesData);
-      console.log("✅ キー発行:", licenseKey, buyerEmail);
-
-      // Supabaseに記録
       try {
-        await supabase.from("license_issues").insert({
-          license_key: licenseKey,
-          buyer_email: buyerEmail,
-          sale_id:     saleId,
+        await insertLicense({
+          licenseKey,
+          status:     "active",
           plan,
-          status:      "active",
-          created_at:  Date.now()
+          buyerEmail,
+          saleId,
+          productId:  String(productId || "")
         });
+        console.log("✅ キー発行:", licenseKey, buyerEmail);
       } catch (e) {
-        console.warn("Supabase記録失敗（無視）:", e.message);
+        console.error("キー発行失敗:", e.message);
+        return res.status(500).json({ ok: false, message: "キー発行に失敗しました" });
       }
 
-      // メール自動送信
       await sendLicenseEmail(buyerEmail, licenseKey, plan, productName);
 
       return res.json({ ok: true, action: "issued", licenseKey });
@@ -590,42 +585,35 @@ app.post("/webhook/gumroad", async (req, res) => {
       resourceName === "refund" ||
       isCancelEvent
     ) {
-      const licensesData = readLicensesFile();
-      let cancelledKey = "";
-      let cancelledEmail = buyerEmail;
-      let cancelledProductId = productId;
+      let cancelledRows = [];
+      try {
+        cancelledRows = await cancelLicensesBySaleOrEmail(saleId, buyerEmail);
+      } catch (e) {
+        console.error("キー無効化失敗:", e.message);
+        return res.status(500).json({ ok: false, message: "キー無効化に失敗しました" });
+      }
 
-      licensesData.licenses = licensesData.licenses.map(item => {
-        if (
-          String(item.saleId || "") === String(saleId) ||
-          String(item.buyerEmail || "").toLowerCase() === buyerEmail.toLowerCase()
-        ) {
-          cancelledKey = item.licenseKey;
-          cancelledEmail = item.buyerEmail || buyerEmail;
-          cancelledProductId = item.productId || productId;
-          console.log("🚫 キー無効化:", item.licenseKey, buyerEmail);
-          return { ...item, status: "cancelled", cancelledAt: new Date().toISOString() };
-        }
-        return item;
-      });
-      writeLicensesFile(licensesData);
-
-      // Supabaseのbindingも無効化
+      // license_bindings側も無効化
       if (saleId) {
         try {
           await supabase.from("license_bindings").update({ status: "cancelled" }).eq("sale_id", saleId);
         } catch (e) {
-          console.warn("Supabase無効化失敗（無視）:", e.message);
+          console.warn("license_bindings無効化失敗（無視）:", e.message);
         }
       }
 
-      // 解約メール送信
-      if (cancelledKey && cancelledEmail) {
-        const productName = getProductNameFromProductId(cancelledProductId);
-        await sendCancelEmail(cancelledEmail, cancelledKey, productName);
+      // 解約メール送信（無効化された各キーに対して）
+      for (const row of cancelledRows) {
+        const email = row.buyer_email || buyerEmail;
+        const pid   = row.product_id  || productId;
+        if (email && row.license_key) {
+          const productName = getProductNameFromProductId(pid);
+          await sendCancelEmail(email, row.license_key, productName);
+          console.log("🚫 キー無効化:", row.license_key, email);
+        }
       }
 
-      return res.json({ ok: true, action: "cancelled" });
+      return res.json({ ok: true, action: "cancelled", count: cancelledRows.length });
     }
 
     return res.json({ ok: true, action: "ignored", resourceName });
