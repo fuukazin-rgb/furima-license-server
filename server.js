@@ -646,6 +646,7 @@ app.get('/yahoo-search', (req, res) => {
   fetch(url)
     .then(r => r.json())
     .then(json => {
+      res.json({ debug: json }); return;
       const hits = (json.hits || []).map(item => ({
         name: item.name,
         price: item.price,
