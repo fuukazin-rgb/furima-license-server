@@ -626,34 +626,3 @@ app.post("/webhook/gumroad", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`License server running on port ${PORT}`);
-});
-// ===== /yahoo-search proxy endpoint (price compare extension) =====
-
-app.get('/yahoo-search', (req, res) => {
-  const q = req.query.q;
-  if (!q) {
-    return res.status(400).json({ error: 'query parameter q is required' });
-  }
-
-  const appId = process.env.YAHOO_APP_ID;
-  if (!appId) {
-    return res.status(500).json({ error: 'YAHOO_APP_ID not configured' });
-  }
-
-  const encoded = encodeURIComponent(q);
-  const url = `https://shopping.yahooapis.jp/ShoppingWebService/V3/itemSearch?appid=${appId}&query=${encoded}&results=10`;
-
-  fetch(url)
-    .then(r => r.json())
-    .then(json => {
-      res.json({ debug: json }); return;
-      const hits = (json.hits || []).map(item => ({
-        name: item.name,
-        price: item.price,
-        url: item.url,
-        image: item.image && item.image.small
-      }));
-      res.json({ hits });
-    })
-    .catch(e => res.status(500).json({ error: 'fetch error', detail: e.message }));
-});
