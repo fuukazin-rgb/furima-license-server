@@ -641,7 +641,7 @@ app.get('/yahoo-search', (req, res) => {
   }
 
   const encoded = encodeURIComponent(q);
-  const url = `https://shopping.yahooapis.jp/ShoppingWebService/V3/itemSearch?appid=${appId}&query=${encoded}&results=10&sort=-sold_count`;
+  const url = `https://shopping.yahooapis.jp/ShoppingWebService/V3/itemSearch?appid=${appId}&query=${encoded}&results=10`;
 
   fetch(url)
     .then(r => r.json())
