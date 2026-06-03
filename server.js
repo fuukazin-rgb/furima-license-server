@@ -626,3 +626,4 @@ app.post("/webhook/gumroad", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`License server running on port ${PORT}`);
+});
