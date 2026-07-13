@@ -11,6 +11,6 @@
     "@supabase/supabase-js": "^2.49.8",
     "cors": "^2.8.5",
     "express": "^4.19.2",
-    "resend": "^4.0.0"
+    "nodemailer": "^9.0.3"
   }
 }

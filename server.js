@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
-import { Resend } from "resend";
+import nodemailer from "nodemailer";
 
 const app = express();
 
@@ -10,14 +10,26 @@ const TRIAL_DAYS = Number(process.env.TRIAL_DAYS || 7);
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
+const GMAIL_USER         = process.env.GMAIL_USER || "";
+const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || "";
+// 送信失敗の通知先（未設定なら GMAIL_USER 宛）
+const ADMIN_EMAIL        = process.env.ADMIN_EMAIL || GMAIL_USER;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error("Missing Supabase environment variables");
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
+const mailer = (GMAIL_USER && GMAIL_APP_PASSWORD)
+  ? nodemailer.createTransport({
+      service: "gmail",
+      auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD }
+    })
+  : null;
+
+if (!mailer) {
+  console.error("⚠️ GMAIL_USER / GMAIL_APP_PASSWORD が未設定です。メールは送信されません。");
+}
 
 app.use(cors());
 app.use(express.json());
@@ -50,13 +62,62 @@ function buildTrialResponse(record) {
   };
 }
 
-// ── メール送信 ──────────────────────────────────────────────────
-async function sendLicenseEmail(buyerEmail, licenseKey, plan, productName) {
-  if (!resend) {
-    console.warn("Resend未設定のためメール送信スキップ");
-    return;
+// ── メール送信（Gmail SMTP） ────────────────────────────────────
+// 成功なら true / 失敗なら false を返す（呼び出し側で必ず確認すること）
+async function sendMail({ to, subject, html }) {
+  if (!mailer) {
+    console.error("❌ メール送信不可（GMAIL未設定）:", to, subject);
+    return false;
   }
+  try {
+    await mailer.sendMail({
+      from: `"niche-hobby" <${GMAIL_USER}>`,
+      to,
+      subject,
+      html
+    });
+    console.log("✉️ メール送信完了:", to, "|", subject);
+    return true;
+  } catch (e) {
+    console.error("❌ メール送信失敗:", to, "|", e.message);
+    return false;
+  }
+}
 
+// 送信に失敗したとき、自分自身に警告メールを送る
+async function notifyAdminOfFailure({ buyerEmail, licenseKey, productName, reason }) {
+  if (!mailer || !ADMIN_EMAIL) return;
+  const html = `
+<!DOCTYPE html>
+<html lang="ja">
+<head><meta charset="UTF-8"></head>
+<body style="font-family:sans-serif;padding:20px;color:#333;">
+  <h2 style="color:#e74c3c;">⚠️ ライセンスキーのメール送信に失敗しました</h2>
+  <p><strong>至急、手動でキーをお客様に送ってください。</strong></p>
+  <table border="1" cellpadding="8" style="border-collapse:collapse;">
+    <tr><td>購入者メール</td><td><strong>${buyerEmail || "(不明)"}</strong></td></tr>
+    <tr><td>ライセンスキー</td><td><strong>${licenseKey || "(不明)"}</strong></td></tr>
+    <tr><td>商品</td><td>${productName || "(不明)"}</td></tr>
+    <tr><td>理由</td><td>${reason || "(不明)"}</td></tr>
+    <tr><td>発生時刻</td><td>${new Date().toISOString()}</td></tr>
+  </table>
+</body>
+</html>
+  `;
+  try {
+    await mailer.sendMail({
+      from: `"niche-hobby system" <${GMAIL_USER}>`,
+      to: ADMIN_EMAIL,
+      subject: `🚨【要対応】ライセンスキー送信失敗（${buyerEmail || "不明"}）`,
+      html
+    });
+    console.log("🚨 管理者へ失敗通知を送信しました:", ADMIN_EMAIL);
+  } catch (e) {
+    console.error("管理者通知すら失敗:", e.message);
+  }
+}
+
+async function sendLicenseEmail(buyerEmail, licenseKey, plan, productName) {
   const planLabel = plan === "year" ? "年額プラン" : "月額プラン";
 
   const html = `
@@ -64,7 +125,7 @@ async function sendLicenseEmail(buyerEmail, licenseKey, plan, productName) {
 <html lang="ja">
 <head><meta charset="UTF-8"></head>
 <body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#333;">
-  <h2 style="color:#4a90e2;">【fuukazin】ライセンスキーのご案内</h2>
+  <h2 style="color:#4a90e2;">【niche-hobby】ライセンスキーのご案内</h2>
   <p>この度は <strong>${productName}（${planLabel}）</strong> をご購入いただき、誠にありがとうございます。</p>
   <p>以下のライセンスキーを拡張機能の認証画面に入力してください。</p>
   <div style="background:#f5f5f5;border:2px solid #4a90e2;border-radius:8px;padding:20px;text-align:center;margin:20px 0;">
@@ -79,52 +140,57 @@ async function sendLicenseEmail(buyerEmail, licenseKey, plan, productName) {
   </ol>
   <p style="color:#e74c3c;font-size:13px;">※ このキーは1台の端末専用です。端末を変更する場合はサポートまでご連絡ください。</p>
   <hr style="border:none;border-top:1px solid #eee;margin:20px 0;">
-  <p style="font-size:12px;color:#999;">ご不明な点はX（@niche_hobby）またはnote経由でお問い合わせください。</p>
+  <p style="font-size:13px;">
+    ご不明な点はお気軽にご連絡ください。<br>
+    ● メール：${GMAIL_USER}<br>
+    ● LINE公式アカウント （@978rgtyk）　→ https://lin.ee/u6rgCbP
+  </p>
 </body>
 </html>
   `;
 
-  try {
-    await resend.emails.send({
-      from: "fuukazin <onboarding@resend.dev>",
-      to: buyerEmail,
-      subject: `【fuukazin】ライセンスキーをお届けします（${productName}）`,
-      html
-    });
-    console.log("✉️ メール送信完了:", buyerEmail);
-  } catch (e) {
-    console.error("メール送信失敗:", e.message);
-  }
+  return await sendMail({
+    to: buyerEmail,
+    subject: `【niche-hobby】ライセンスキーをお届けします（${productName}）`,
+    html
+  });
 }
 
 async function sendCancelEmail(buyerEmail, licenseKey, productName) {
-  if (!resend) return;
-
   const html = `
 <!DOCTYPE html>
 <html lang="ja">
 <head><meta charset="UTF-8"></head>
 <body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#333;">
-  <h2 style="color:#e74c3c;">【fuukazin】ご解約のご連絡</h2>
+  <h2 style="color:#e74c3c;">【niche-hobby】ご解約のご連絡</h2>
   <p><strong>${productName}</strong> のご解約を承りました。</p>
   <p>ライセンスキー <strong>${licenseKey}</strong> は無効化されました。</p>
   <p>またのご利用をお待ちしております。</p>
   <hr style="border:none;border-top:1px solid #eee;margin:20px 0;">
-  <p style="font-size:12px;color:#999;">ご不明な点はX（@niche_hobby）またはnote経由でお問い合わせください。</p>
+  <p style="font-size:13px;">
+    ● メール：${GMAIL_USER}<br>
+    ● LINE公式アカウント （@978rgtyk）　→ https://lin.ee/u6rgCbP
+  </p>
 </body>
 </html>
   `;
 
+  return await sendMail({
+    to: buyerEmail,
+    subject: `【niche-hobby】ご解約を承りました（${productName}）`,
+    html
+  });
+}
+
+// licenses テーブルにメール送信結果を記録する（email_sent カラム）
+async function markEmailSent(licenseKey, sent) {
   try {
-    await resend.emails.send({
-      from: "fuukazin <onboarding@resend.dev>",
-      to: buyerEmail,
-      subject: `【fuukazin】ご解約を承りました（${productName}）`,
-      html
-    });
-    console.log("✉️ 解約メール送信完了:", buyerEmail);
+    await supabase
+      .from("licenses")
+      .update({ email_sent: sent })
+      .eq("license_key", licenseKey);
   } catch (e) {
-    console.error("解約メール送信失敗:", e.message);
+    console.warn("email_sent の記録に失敗（無視）:", e.message);
   }
 }
 
@@ -395,7 +461,7 @@ app.get("/", (req, res) => {
     storage: "supabase(licenses + trials + license_bindings)",
     trialDays: TRIAL_DAYS,
     hasSupabase: Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY),
-    hasResend: Boolean(RESEND_API_KEY)
+    hasMailer: Boolean(mailer)
   });
 });
 
@@ -574,9 +640,23 @@ app.post("/webhook/gumroad", async (req, res) => {
         return res.status(500).json({ ok: false, message: "キー発行に失敗しました" });
       }
 
-      await sendLicenseEmail(buyerEmail, licenseKey, plan, productName);
+      // ★メール送信の成否を必ず確認する（握りつぶさない）
+      const sent = await sendLicenseEmail(buyerEmail, licenseKey, plan, productName);
+      await markEmailSent(licenseKey, sent);
 
-      return res.json({ ok: true, action: "issued", licenseKey });
+      if (!sent) {
+        // 送信できなかった → 自分に緊急通知を送り、手動対応できるようにする
+        console.error("🚨 キーは発行されたがメールが届いていません:", licenseKey, buyerEmail);
+        await notifyAdminOfFailure({
+          buyerEmail,
+          licenseKey,
+          productName,
+          reason: "sendLicenseEmail が false を返しました（SMTP設定 or 送信エラー）"
+        });
+        return res.json({ ok: true, action: "issued_but_email_failed", licenseKey });
+      }
+
+      return res.json({ ok: true, action: "issued", licenseKey, emailSent: true });
     }
 
     // ── キャンセル・返金時: キー即無効化 → メール通知 ──
