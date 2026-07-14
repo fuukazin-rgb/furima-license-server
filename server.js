@@ -1,14 +1,16 @@
 import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
-import nodemailer from "nodemailer";
 import dns from "node:dns";
 
-// ★重要★ Render無料プランはIPv6の外向き通信ができない。
-// Node.js 18以降はDNS解決でIPv6を優先するため、smtp.gmail.com のIPv6アドレスに
-// 接続しようとして「connect ENETUNREACH」で失敗する。
-// 下記1行でIPv4を優先させることで、Gmail SMTPへ正常に接続できるようになる。
+// Render無料プランはIPv6の外向き通信ができないため、IPv4を優先させる
 dns.setDefaultResultOrder("ipv4first");
+
+// ★メール送信について★
+// Renderの無料プランは SMTPポート（25/465/587）を全てブロックしている。
+// そのため nodemailer（SMTP）は使えない。
+// 代わりに Brevo の HTTP API（https / 443番ポート）でメールを送る。
+// 443番はブロックされないため、無料プランでも確実に送信できる。
 
 const app = express();
 
@@ -17,40 +19,39 @@ const TRIAL_DAYS = Number(process.env.TRIAL_DAYS || 7);
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-const GMAIL_USER         = process.env.GMAIL_USER || "";
-const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || "";
-// 送信失敗の通知先（未設定なら GMAIL_USER 宛）
-const ADMIN_EMAIL        = process.env.ADMIN_EMAIL || GMAIL_USER;
+const BREVO_API_KEY = process.env.BREVO_API_KEY || "";
+// Brevoに登録・認証済みの送信元アドレス
+const SENDER_EMAIL  = process.env.SENDER_EMAIL || "niche.frima@gmail.com";
+const SENDER_NAME   = "niche-hobby";
+// 送信失敗の通知先（未設定なら SENDER_EMAIL 宛）
+const ADMIN_EMAIL   = process.env.ADMIN_EMAIL || SENDER_EMAIL;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error("Missing Supabase environment variables");
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-// ★変更点★ service:"gmail" をやめ、host/port を明示 + family:4 でIPv4を強制する。
-// これによりRender無料プランでもGmail SMTPへ接続できる。
-const mailer = (GMAIL_USER && GMAIL_APP_PASSWORD)
-  ? nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 465,
-      secure: true,          // 465番ポートはSSL接続
-      family: 4,             // ★IPv4を強制（ENETUNREACH対策）
-      auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD },
-      connectionTimeout: 20000,
-      greetingTimeout: 20000,
-      socketTimeout: 20000
-    })
-  : null;
+const mailerReady = Boolean(BREVO_API_KEY);
 
-// 起動時にSMTP接続を確認しておく（失敗してもサーバーは止めない）
-if (mailer) {
-  mailer.verify()
-    .then(() => console.log("✅ Gmail SMTP 接続OK:", GMAIL_USER))
-    .catch(e => console.error("❌ Gmail SMTP 接続NG:", e.message));
+if (!mailerReady) {
+  console.error("⚠️ BREVO_API_KEY が未設定です。メールは送信されません。");
 }
 
-if (!mailer) {
-  console.error("⚠️ GMAIL_USER / GMAIL_APP_PASSWORD が未設定です。メールは送信されません。");
+// 起動時に Brevo API キーが有効か確認する（失敗してもサーバーは止めない）
+if (mailerReady) {
+  fetch("https://api.brevo.com/v3/account", {
+    method: "GET",
+    headers: { "api-key": BREVO_API_KEY, "accept": "application/json" }
+  })
+    .then(async res => {
+      if (res.ok) {
+        console.log("✅ Brevo API 接続OK / 送信元:", SENDER_EMAIL);
+      } else {
+        const body = await res.text();
+        console.error("❌ Brevo API 接続NG:", res.status, body.slice(0, 200));
+      }
+    })
+    .catch(e => console.error("❌ Brevo API 接続NG:", e.message));
 }
 
 app.use(cors());
@@ -84,21 +85,38 @@ function buildTrialResponse(record) {
   };
 }
 
-// ── メール送信（Gmail SMTP） ────────────────────────────────────
+// ── メール送信（Brevo HTTP API） ───────────────────────────────
+// SMTPではなく https://api.brevo.com へのPOSTで送る（443番ポートなのでRenderでも通る）
 // 成功なら true / 失敗なら false を返す（呼び出し側で必ず確認すること）
-async function sendMail({ to, subject, html }) {
-  if (!mailer) {
-    console.error("❌ メール送信不可（GMAIL未設定）:", to, subject);
+async function sendMail({ to, subject, html, fromName }) {
+  if (!mailerReady) {
+    console.error("❌ メール送信不可（BREVO_API_KEY未設定）:", to, subject);
     return false;
   }
   try {
-    await mailer.sendMail({
-      from: `"niche-hobby" <${GMAIL_USER}>`,
-      to,
-      subject,
-      html
+    const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: {
+        "api-key": BREVO_API_KEY,
+        "content-type": "application/json",
+        "accept": "application/json"
+      },
+      body: JSON.stringify({
+        sender: { name: fromName || SENDER_NAME, email: SENDER_EMAIL },
+        to: [{ email: to }],
+        subject,
+        htmlContent: html
+      })
     });
-    console.log("✉️ メール送信完了:", to, "|", subject);
+
+    if (!res.ok) {
+      const body = await res.text();
+      console.error("❌ メール送信失敗:", to, "| HTTP", res.status, "|", body.slice(0, 300));
+      return false;
+    }
+
+    const data = await res.json().catch(() => ({}));
+    console.log("✉️ メール送信完了:", to, "|", subject, "| messageId:", data.messageId || "(不明)");
     return true;
   } catch (e) {
     console.error("❌ メール送信失敗:", to, "|", e.message);
@@ -108,7 +126,7 @@ async function sendMail({ to, subject, html }) {
 
 // 送信に失敗したとき、自分自身に警告メールを送る
 async function notifyAdminOfFailure({ buyerEmail, licenseKey, productName, reason }) {
-  if (!mailer || !ADMIN_EMAIL) return;
+  if (!mailerReady || !ADMIN_EMAIL) return;
   const html = `
 <!DOCTYPE html>
 <html lang="ja">
@@ -126,16 +144,16 @@ async function notifyAdminOfFailure({ buyerEmail, licenseKey, productName, reaso
 </body>
 </html>
   `;
-  try {
-    await mailer.sendMail({
-      from: `"niche-hobby system" <${GMAIL_USER}>`,
-      to: ADMIN_EMAIL,
-      subject: `🚨【要対応】ライセンスキー送信失敗（${buyerEmail || "不明"}）`,
-      html
-    });
+  const ok = await sendMail({
+    to: ADMIN_EMAIL,
+    subject: `🚨【要対応】ライセンスキー送信失敗（${buyerEmail || "不明"}）`,
+    html,
+    fromName: "niche-hobby system"
+  });
+  if (ok) {
     console.log("🚨 管理者へ失敗通知を送信しました:", ADMIN_EMAIL);
-  } catch (e) {
-    console.error("管理者通知すら失敗:", e.message);
+  } else {
+    console.error("管理者通知すら失敗しました");
   }
 }
 
@@ -164,7 +182,7 @@ async function sendLicenseEmail(buyerEmail, licenseKey, plan, productName) {
   <hr style="border:none;border-top:1px solid #eee;margin:20px 0;">
   <p style="font-size:13px;">
     ご不明な点はお気軽にご連絡ください。<br>
-    ● メール：${GMAIL_USER}<br>
+    ● メール：${SENDER_EMAIL}<br>
     ● LINE公式アカウント （@978rgtyk）　→ https://lin.ee/u6rgCbP
   </p>
 </body>
@@ -190,7 +208,7 @@ async function sendCancelEmail(buyerEmail, licenseKey, productName) {
   <p>またのご利用をお待ちしております。</p>
   <hr style="border:none;border-top:1px solid #eee;margin:20px 0;">
   <p style="font-size:13px;">
-    ● メール：${GMAIL_USER}<br>
+    ● メール：${SENDER_EMAIL}<br>
     ● LINE公式アカウント （@978rgtyk）　→ https://lin.ee/u6rgCbP
   </p>
 </body>
@@ -483,7 +501,7 @@ app.get("/", (req, res) => {
     storage: "supabase(licenses + trials + license_bindings)",
     trialDays: TRIAL_DAYS,
     hasSupabase: Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY),
-    hasMailer: Boolean(mailer)
+    hasMailer: mailerReady
   });
 });
 
