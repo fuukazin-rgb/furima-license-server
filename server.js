@@ -2,6 +2,13 @@ import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import nodemailer from "nodemailer";
+import dns from "node:dns";
+
+// ★重要★ Render無料プランはIPv6の外向き通信ができない。
+// Node.js 18以降はDNS解決でIPv6を優先するため、smtp.gmail.com のIPv6アドレスに
+// 接続しようとして「connect ENETUNREACH」で失敗する。
+// 下記1行でIPv4を優先させることで、Gmail SMTPへ正常に接続できるようになる。
+dns.setDefaultResultOrder("ipv4first");
 
 const app = express();
 
@@ -20,12 +27,27 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// ★変更点★ service:"gmail" をやめ、host/port を明示 + family:4 でIPv4を強制する。
+// これによりRender無料プランでもGmail SMTPへ接続できる。
 const mailer = (GMAIL_USER && GMAIL_APP_PASSWORD)
   ? nodemailer.createTransport({
-      service: "gmail",
-      auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD }
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,          // 465番ポートはSSL接続
+      family: 4,             // ★IPv4を強制（ENETUNREACH対策）
+      auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD },
+      connectionTimeout: 20000,
+      greetingTimeout: 20000,
+      socketTimeout: 20000
     })
   : null;
+
+// 起動時にSMTP接続を確認しておく（失敗してもサーバーは止めない）
+if (mailer) {
+  mailer.verify()
+    .then(() => console.log("✅ Gmail SMTP 接続OK:", GMAIL_USER))
+    .catch(e => console.error("❌ Gmail SMTP 接続NG:", e.message));
+}
 
 if (!mailer) {
   console.error("⚠️ GMAIL_USER / GMAIL_APP_PASSWORD が未設定です。メールは送信されません。");
