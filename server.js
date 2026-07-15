@@ -13,15 +13,15 @@ dns.setDefaultResultOrder("ipv4first");
 // 443番はブロックされないため、無料プランでも確実に送信できる。
 
 const app = express();
-
 const PORT = Number(process.env.PORT || 3000);
 const TRIAL_DAYS = Number(process.env.TRIAL_DAYS || 7);
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+
 const BREVO_API_KEY = process.env.BREVO_API_KEY || "";
 // Brevoに登録・認証済みの送信元アドレス
-const SENDER_EMAIL  = process.env.SENDER_EMAIL || "niche.frima@gmail.com";
+const SENDER_EMAIL  = process.env.SENDER_EMAIL || "support@niche-hobby.com";
 const SENDER_NAME   = "niche-hobby";
 // 送信失敗の通知先（未設定なら SENDER_EMAIL 宛）
 const ADMIN_EMAIL   = process.env.ADMIN_EMAIL || SENDER_EMAIL;
@@ -31,8 +31,8 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-const mailerReady = Boolean(BREVO_API_KEY);
 
+const mailerReady = Boolean(BREVO_API_KEY);
 if (!mailerReady) {
   console.error("⚠️ BREVO_API_KEY が未設定です。メールは送信されません。");
 }
@@ -108,13 +108,11 @@ async function sendMail({ to, subject, html, fromName }) {
         htmlContent: html
       })
     });
-
     if (!res.ok) {
       const body = await res.text();
       console.error("❌ メール送信失敗:", to, "| HTTP", res.status, "|", body.slice(0, 300));
       return false;
     }
-
     const data = await res.json().catch(() => ({}));
     console.log("✉️ メール送信完了:", to, "|", subject, "| messageId:", data.messageId || "(不明)");
     return true;
@@ -159,7 +157,6 @@ async function notifyAdminOfFailure({ buyerEmail, licenseKey, productName, reaso
 
 async function sendLicenseEmail(buyerEmail, licenseKey, plan, productName) {
   const planLabel = plan === "year" ? "年額プラン" : "月額プラン";
-
   const html = `
 <!DOCTYPE html>
 <html lang="ja">
@@ -188,7 +185,6 @@ async function sendLicenseEmail(buyerEmail, licenseKey, plan, productName) {
 </body>
 </html>
   `;
-
   return await sendMail({
     to: buyerEmail,
     subject: `【niche-hobby】ライセンスキーをお届けします（${productName}）`,
@@ -214,7 +210,6 @@ async function sendCancelEmail(buyerEmail, licenseKey, productName) {
 </body>
 </html>
   `;
-
   return await sendMail({
     to: buyerEmail,
     subject: `【niche-hobby】ご解約を承りました（${productName}）`,
@@ -505,40 +500,6 @@ app.get("/", (req, res) => {
   });
 });
 
-// ══════════════════════════════════════════════════════════════
-// ★【一時的・検証用】Brevo送信テスト用エンドポイント★
-// 使い方：ブラウザで下記URLを開くと、指定アドレスに1通テストメールを送る。
-//   https://furima-license-server-1.onrender.com/test-mail?to=niche.frima@gmail.com
-// 「to=」を省略すると SENDER_EMAIL（niche.frima@gmail.com）宛に送る。
-// ★検証が終わったら、この app.get("/test-mail", ...) のブロックごと削除してOK。★
-// ══════════════════════════════════════════════════════════════
-app.get("/test-mail", async (req, res) => {
-  const to = String(req.query.to || SENDER_EMAIL).trim();
-  console.log("🧪 /test-mail 実行 →", to);
-
-  const html = `
-<!DOCTYPE html>
-<html lang="ja"><head><meta charset="UTF-8"></head>
-<body style="font-family:sans-serif;padding:20px;color:#333;">
-  <h2 style="color:#4a90e2;">✅ Brevo送信テスト成功</h2>
-  <p>このメールが届いていれば、Brevo経由のメール送信は正常に動いています。</p>
-  <p>送信時刻: ${new Date().toISOString()}</p>
-</body></html>
-  `;
-
-  const sent = await sendMail({
-    to,
-    subject: "【niche-hobby】Brevo送信テスト",
-    html
-  });
-
-  if (sent) {
-    return res.json({ ok: true, message: `送信しました: ${to}。受信トレイ（と迷惑メール）を確認してください。` });
-  } else {
-    return res.status(500).json({ ok: false, message: "送信に失敗しました。Renderのログを確認してください。" });
-  }
-});
-
 app.post("/verify", async (req, res) => {
   try {
     const { licenseKey, deviceId } = req.body || {};
@@ -663,7 +624,6 @@ function getProductNameFromProductId(productId) {
 app.post("/webhook/gumroad", async (req, res) => {
   try {
     const body = req.body || {};
-
     console.log("=== Gumroad webhook RAW body ===");
     console.log(JSON.stringify(body, null, 2));
     console.log("=== Content-Type:", req.headers["content-type"], "===");
@@ -698,7 +658,6 @@ app.post("/webhook/gumroad", async (req, res) => {
       }
 
       const licenseKey = generateLicenseKey(prefix);
-
       try {
         await insertLicense({
           licenseKey,
@@ -771,7 +730,6 @@ app.post("/webhook/gumroad", async (req, res) => {
     }
 
     return res.json({ ok: true, action: "ignored", resourceName });
-
   } catch (e) {
     console.error("/webhook/gumroad error:", e);
     return res.status(500).json({ ok: false, message: e.message });
