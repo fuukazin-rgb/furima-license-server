@@ -505,6 +505,40 @@ app.get("/", (req, res) => {
   });
 });
 
+// ══════════════════════════════════════════════════════════════
+// ★【一時的・検証用】Brevo送信テスト用エンドポイント★
+// 使い方：ブラウザで下記URLを開くと、指定アドレスに1通テストメールを送る。
+//   https://furima-license-server-1.onrender.com/test-mail?to=niche.frima@gmail.com
+// 「to=」を省略すると SENDER_EMAIL（niche.frima@gmail.com）宛に送る。
+// ★検証が終わったら、この app.get("/test-mail", ...) のブロックごと削除してOK。★
+// ══════════════════════════════════════════════════════════════
+app.get("/test-mail", async (req, res) => {
+  const to = String(req.query.to || SENDER_EMAIL).trim();
+  console.log("🧪 /test-mail 実行 →", to);
+
+  const html = `
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="UTF-8"></head>
+<body style="font-family:sans-serif;padding:20px;color:#333;">
+  <h2 style="color:#4a90e2;">✅ Brevo送信テスト成功</h2>
+  <p>このメールが届いていれば、Brevo経由のメール送信は正常に動いています。</p>
+  <p>送信時刻: ${new Date().toISOString()}</p>
+</body></html>
+  `;
+
+  const sent = await sendMail({
+    to,
+    subject: "【niche-hobby】Brevo送信テスト",
+    html
+  });
+
+  if (sent) {
+    return res.json({ ok: true, message: `送信しました: ${to}。受信トレイ（と迷惑メール）を確認してください。` });
+  } else {
+    return res.status(500).json({ ok: false, message: "送信に失敗しました。Renderのログを確認してください。" });
+  }
+});
+
 app.post("/verify", async (req, res) => {
   try {
     const { licenseKey, deviceId } = req.body || {};
