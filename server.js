@@ -594,15 +594,42 @@ function generateLicenseKey(prefix) {
   return `${prefix}-${seg()}-${seg()}-${seg()}`;
 }
 
-function getPrefixFromProductId(productId) {
-  const id = String(productId).toLowerCase();
-  if (id.includes("kanri") || id.includes("fka")) return "FKA";
-  return "FRP";
+// ── 管理アシスト(FKA)かどうかを、body全体を見て多角的に判定する ──
+// Gumroadの product_id はエンコード文字列（例: kW-Wc0cxfIvNh6pF7mgAQw==）で来るため、
+// permalink（hnpwm）や商品名（Tier/フリマ管理アシスト）も合わせて見ることで取り違えを防ぐ。
+// 管理アシストの Gumroad permalink: hnpwm ／ 出品Pro Gumroad permalink: rswvg
+const KANRI_PERMALINKS = ["hnpwm"]; // 管理アシストのpermalink（増えたらここに追加）
+
+function isKanriProduct(body) {
+  const b = body || {};
+  // 1) permalink 系に管理アシストのpermalinkが含まれるか
+  const permalinkFields = [
+    b.product_permalink, b.permalink, b.short_product_id, b.product_id
+  ].map(v => String(v || "").toLowerCase());
+  if (permalinkFields.some(v => KANRI_PERMALINKS.some(p => v.includes(p)))) return true;
+
+  // 2) 従来どおり "kanri" / "fka" の文字を含むか（保険）
+  if (permalinkFields.some(v => v.includes("kanri") || v.includes("fka"))) return true;
+
+  // 3) 商品名・Tier・variants の表示名に「管理」が含まれるか
+  const nameFields = [
+    b.product_name, b.name, b.Tier, b.tier
+  ].map(v => String(v || ""));
+  // variants は JSON文字列で来ることがあるので、その中身も文字列として見る
+  try {
+    if (b.variants) nameFields.push(JSON.stringify(b.variants));
+  } catch (e) { /* ignore */ }
+  if (nameFields.some(v => v.includes("管理"))) return true;
+
+  return false;
 }
 
-function getPlanFromProductId(productId) {
-  if (String(productId).toLowerCase().includes("year")) return "year";
-  return "month";
+function getPrefixFromBody(body) {
+  return isKanriProduct(body) ? "FKA" : "FRP";
+}
+
+function getProductNameFromBody(body) {
+  return isKanriProduct(body) ? "フリマ管理アシスト" : "フリマ出品アシスト Pro";
 }
 
 // Gumroadの recurrence（"monthly" / "yearly"）からプランを判定（最優先）
@@ -610,15 +637,12 @@ function getPlanFromBody(body) {
   const rec = String(body.recurrence || "").toLowerCase();
   if (rec === "yearly" || rec === "annually" || rec === "year") return "year";
   if (rec === "monthly" || rec === "month") return "month";
-  return getPlanFromProductId(
-    body.product_id || body.short_product_id || body.product_permalink || ""
-  );
-}
-
-function getProductNameFromProductId(productId) {
-  const id = String(productId).toLowerCase();
-  if (id.includes("kanri") || id.includes("fka")) return "フリマ管理アシスト";
-  return "フリマ出品アシスト Pro";
+  // recurrence が無い場合の保険: 各種フィールドに "year" が含まれるか
+  const idlike = [
+    body.product_id, body.short_product_id, body.product_permalink, body.permalink
+  ].map(v => String(v || "").toLowerCase());
+  if (idlike.some(v => v.includes("year"))) return "year";
+  return "month";
 }
 
 app.post("/webhook/gumroad", async (req, res) => {
@@ -648,9 +672,9 @@ app.post("/webhook/gumroad", async (req, res) => {
       && resourceName !== "refund";
 
     if (isSaleEvent) {
-      const prefix      = getPrefixFromProductId(productId);
+      const prefix      = getPrefixFromBody(body);
       const plan        = getPlanFromBody(body);
-      const productName = getProductNameFromProductId(productId);
+      const productName = getProductNameFromBody(body);
 
       if (isTest) {
         console.log("🧪 テストPing検知: 実発行はスキップします。判定結果 →", { prefix, plan, productName, buyerEmail });
@@ -720,7 +744,11 @@ app.post("/webhook/gumroad", async (req, res) => {
         const email = row.buyer_email || buyerEmail;
         const pid   = row.product_id  || productId;
         if (email && row.license_key) {
-          const productName = getProductNameFromProductId(pid);
+          // キーのプレフィックス（FKA-/FRP-）が最も確実な手掛かりなので優先し、
+          // 無ければ product_id / webhook本文から判定する
+          const isKanri = String(row.license_key || "").toUpperCase().startsWith("FKA-")
+            || isKanriProduct({ product_id: pid, product_permalink: pid, ...body });
+          const productName = isKanri ? "フリマ管理アシスト" : "フリマ出品アシスト Pro";
           await sendCancelEmail(email, row.license_key, productName);
           console.log("🚫 キー無効化:", row.license_key, email);
         }
