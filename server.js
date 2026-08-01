@@ -2,41 +2,32 @@ import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import dns from "node:dns";
-
 // Render無料プランはIPv6の外向き通信ができないため、IPv4を優先させる
 dns.setDefaultResultOrder("ipv4first");
-
 // ★メール送信について★
 // Renderの無料プランは SMTPポート（25/465/587）を全てブロックしている。
 // そのため nodemailer（SMTP）は使えない。
 // 代わりに Brevo の HTTP API（https / 443番ポート）でメールを送る。
 // 443番はブロックされないため、無料プランでも確実に送信できる。
-
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const TRIAL_DAYS = Number(process.env.TRIAL_DAYS || 7);
-
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-
 const BREVO_API_KEY = process.env.BREVO_API_KEY || "";
 // Brevoに登録・認証済みの送信元アドレス
 const SENDER_EMAIL  = process.env.SENDER_EMAIL || "support@niche-hobby.com";
 const SENDER_NAME   = "niche-hobby";
 // 送信失敗の通知先（未設定なら SENDER_EMAIL 宛）
 const ADMIN_EMAIL   = process.env.ADMIN_EMAIL || SENDER_EMAIL;
-
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error("Missing Supabase environment variables");
 }
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-
 const mailerReady = Boolean(BREVO_API_KEY);
 if (!mailerReady) {
   console.error("⚠️ BREVO_API_KEY が未設定です。メールは送信されません。");
 }
-
 // 起動時に Brevo API キーが有効か確認する（失敗してもサーバーは止めない）
 if (mailerReady) {
   fetch("https://api.brevo.com/v3/account", {
@@ -53,16 +44,13 @@ if (mailerReady) {
     })
     .catch(e => console.error("❌ Brevo API 接続NG:", e.message));
 }
-
 app.use(cors());
 app.use(express.json());
 // ★Gumroadのwebhook(Ping)は application/x-www-form-urlencoded で届くため必須
 app.use(express.urlencoded({ extended: true }));
-
 function nowMs() {
   return Date.now();
 }
-
 function buildTrialResponse(record) {
   const now = nowMs();
   const diff = Number(record.end_at) - now;
@@ -84,7 +72,6 @@ function buildTrialResponse(record) {
       : null
   };
 }
-
 // ── メール送信（Brevo HTTP API） ───────────────────────────────
 // SMTPではなく https://api.brevo.com へのPOSTで送る（443番ポートなのでRenderでも通る）
 // 成功なら true / 失敗なら false を返す（呼び出し側で必ず確認すること）
@@ -121,7 +108,6 @@ async function sendMail({ to, subject, html, fromName }) {
     return false;
   }
 }
-
 // 送信に失敗したとき、自分自身に警告メールを送る
 async function notifyAdminOfFailure({ buyerEmail, licenseKey, productName, reason }) {
   if (!mailerReady || !ADMIN_EMAIL) return;
@@ -154,7 +140,6 @@ async function notifyAdminOfFailure({ buyerEmail, licenseKey, productName, reaso
     console.error("管理者通知すら失敗しました");
   }
 }
-
 async function sendLicenseEmail(buyerEmail, licenseKey, plan, productName) {
   const planLabel = plan === "year" ? "年額プラン" : "月額プラン";
   const html = `
@@ -191,7 +176,6 @@ async function sendLicenseEmail(buyerEmail, licenseKey, plan, productName) {
     html
   });
 }
-
 async function sendCancelEmail(buyerEmail, licenseKey, productName) {
   const html = `
 <!DOCTYPE html>
@@ -216,7 +200,6 @@ async function sendCancelEmail(buyerEmail, licenseKey, productName) {
     html
   });
 }
-
 // licenses テーブルにメール送信結果を記録する（email_sent カラム）
 async function markEmailSent(licenseKey, sent) {
   try {
@@ -228,7 +211,6 @@ async function markEmailSent(licenseKey, sent) {
     console.warn("email_sent の記録に失敗（無視）:", e.message);
   }
 }
-
 // ── licenses テーブル操作（旧 licenses.json の置き換え） ──────────
 async function getLicenseByKey(licenseKey) {
   const key = String(licenseKey || "").trim();
@@ -241,7 +223,25 @@ async function getLicenseByKey(licenseKey) {
   if (error) throw error;
   return data;
 }
-
+// 同じ購入者(email)が、同じ商品プレフィックス(FRP/FKA)の「有効な(active)」キーを
+// 既に持っているかを調べる。見つかれば更新課金の二重発行を防ぐために使う。
+// 一番古い1件だけ返す（初回に発行された正規のキーを優先するため）。
+async function findActiveLicenseByEmailAndPrefix(buyerEmail, prefix) {
+  const email = String(buyerEmail || "").trim();
+  const pfx   = String(prefix || "").trim();
+  if (!email || !pfx) return null;
+  const { data, error } = await supabase
+    .from("licenses")
+    .select("*")
+    .eq("status", "active")
+    .ilike("buyer_email", email)
+    .ilike("license_key", `${pfx}-%`)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
 async function insertLicense({ licenseKey, status, plan, buyerEmail, saleId, productId }) {
   const payload = {
     license_key:     licenseKey,
@@ -260,13 +260,11 @@ async function insertLicense({ licenseKey, status, plan, buyerEmail, saleId, pro
   if (error) throw error;
   return data;
 }
-
 async function cancelLicensesBySaleOrEmail(saleId, buyerEmail) {
   const conditions = [];
   if (saleId) conditions.push(`sale_id.eq.${saleId}`);
   if (buyerEmail) conditions.push(`buyer_email.ilike.${buyerEmail}`);
   if (conditions.length === 0) return [];
-
   // active なものだけ対象に検索
   const { data: matches, error: findError } = await supabase
     .from("licenses")
@@ -275,7 +273,6 @@ async function cancelLicensesBySaleOrEmail(saleId, buyerEmail) {
     .or(conditions.join(","));
   if (findError) throw findError;
   if (!matches || matches.length === 0) return [];
-
   const keys = matches.map(m => m.license_key);
   const { data: updated, error: updateError } = await supabase
     .from("licenses")
@@ -285,7 +282,6 @@ async function cancelLicensesBySaleOrEmail(saleId, buyerEmail) {
   if (updateError) throw updateError;
   return updated || [];
 }
-
 // ── trials テーブル ─────────────────────────────────────────────
 async function getTrialByFingerprint(fingerprint) {
   if (!fingerprint) return null;
@@ -299,7 +295,6 @@ async function getTrialByFingerprint(fingerprint) {
   if (error) throw error;
   return data;
 }
-
 async function getTrialByDeviceId(deviceId) {
   if (!deviceId) return null;
   const { data, error } = await supabase
@@ -312,7 +307,6 @@ async function getTrialByDeviceId(deviceId) {
   if (error) throw error;
   return data;
 }
-
 async function updateTrialIdentity(id, fingerprint, deviceId) {
   const payload = {};
   if (fingerprint) payload.fingerprint = fingerprint;
@@ -326,7 +320,6 @@ async function updateTrialIdentity(id, fingerprint, deviceId) {
   if (error) throw error;
   return data;
 }
-
 async function createTrial(fingerprint, deviceId) {
   const startAt = nowMs();
   const endAt = startAt + TRIAL_DAYS * 24 * 60 * 60 * 1000;
@@ -344,7 +337,6 @@ async function createTrial(fingerprint, deviceId) {
   if (error) throw error;
   return data;
 }
-
 async function getExistingTrial(fingerprint, deviceId) {
   const byFingerprint = await getTrialByFingerprint(fingerprint);
   if (byFingerprint) {
@@ -370,7 +362,6 @@ async function getExistingTrial(fingerprint, deviceId) {
   }
   return null;
 }
-
 async function getOrCreateTrial(fingerprint, deviceId) {
   let record = await getExistingTrial(fingerprint, deviceId);
   if (record) return record;
@@ -383,7 +374,6 @@ async function getOrCreateTrial(fingerprint, deviceId) {
     throw e;
   }
 }
-
 // ── license_bindings テーブル ───────────────────────────────────
 async function getBindingByLicenseKey(licenseKey) {
   const { data, error } = await supabase
@@ -394,7 +384,6 @@ async function getBindingByLicenseKey(licenseKey) {
   if (error) throw error;
   return data;
 }
-
 async function createBinding({ licenseKey, deviceId, plan, status }) {
   const now = nowMs();
   const payload = {
@@ -413,7 +402,6 @@ async function createBinding({ licenseKey, deviceId, plan, status }) {
   if (error) throw error;
   return data;
 }
-
 async function touchBinding(id) {
   const now = nowMs();
   const { data, error } = await supabase
@@ -425,19 +413,15 @@ async function touchBinding(id) {
   if (error) throw error;
   return data;
 }
-
 // ── ライセンス認証ロジック ──────────────────────────────────────
 async function verifyLicenseFromStorage(licenseKey, deviceId) {
   const license = await getLicenseByKey(licenseKey);
   if (!license) return { valid: false, message: "ライセンスキーが見つかりません" };
-
   const status       = String(license.status || "").toLowerCase();
   const planVal      = String(license.plan || "").toLowerCase() || "unknown";
   const masterDevice = String(license.bound_device_id || "").trim();
-
   if (status !== "active") return { valid: false, message: "このライセンスキーは無効です" };
   if (!deviceId) return { valid: false, message: "deviceId is required" };
-
   let binding = await getBindingByLicenseKey(license.license_key);
   if (binding) {
     if (String(binding.device_id || "").trim() !== deviceId) {
@@ -452,7 +436,6 @@ async function verifyLicenseFromStorage(licenseKey, deviceId) {
       newlyBound: false
     };
   }
-
   if (masterDevice) {
     if (masterDevice !== deviceId) {
       return { valid: false, message: "このライセンスキーは別の端末で使用中です" };
@@ -472,7 +455,6 @@ async function verifyLicenseFromStorage(licenseKey, deviceId) {
       migratedFromJson: true
     };
   }
-
   binding = await createBinding({
     licenseKey: license.license_key,
     deviceId,
@@ -487,7 +469,6 @@ async function verifyLicenseFromStorage(licenseKey, deviceId) {
     newlyBound: true
   };
 }
-
 // ── ルート ──────────────────────────────────────────────────────
 app.get("/", (req, res) => {
   res.json({
@@ -499,7 +480,6 @@ app.get("/", (req, res) => {
     hasMailer: mailerReady
   });
 });
-
 app.post("/verify", async (req, res) => {
   try {
     const { licenseKey, deviceId } = req.body || {};
@@ -512,7 +492,6 @@ app.post("/verify", async (req, res) => {
     return res.status(500).json({ valid: false, message: e.message || "server error" });
   }
 });
-
 app.post("/verify-kanri", async (req, res) => {
   try {
     const { licenseKey, deviceId } = req.body || {};
@@ -528,7 +507,6 @@ app.post("/verify-kanri", async (req, res) => {
     return res.status(500).json({ valid: false, message: e.message || "server error" });
   }
 });
-
 app.post("/trial/start", async (req, res) => {
   try {
     const { fingerprint, deviceId } = req.body || {};
@@ -542,7 +520,6 @@ app.post("/trial/start", async (req, res) => {
     return res.status(500).json({ ok: false, valid: false, message: e.message || "server error" });
   }
 });
-
 app.post("/trial/status", async (req, res) => {
   try {
     const { fingerprint, deviceId } = req.body || {};
@@ -559,7 +536,6 @@ app.post("/trial/status", async (req, res) => {
     return res.status(500).json({ ok: false, valid: false, message: e.message || "server error" });
   }
 });
-
 // ── 開発・サポート用: トライアルのリセット ──
 app.post("/trial/reset", async (req, res) => {
   try {
@@ -584,7 +560,6 @@ app.post("/trial/reset", async (req, res) => {
     return res.status(500).json({ ok: false, message: e.message || "server error" });
   }
 });
-
 // ── Gumroad Webhook（購入→キー発行→メール自動送信、キャンセル→即無効化） ──
 function generateLicenseKey(prefix) {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -593,13 +568,11 @@ function generateLicenseKey(prefix) {
   ).join("");
   return `${prefix}-${seg()}-${seg()}-${seg()}`;
 }
-
 // ── 管理アシスト(FKA)かどうかを、body全体を見て多角的に判定する ──
 // Gumroadの product_id はエンコード文字列（例: kW-Wc0cxfIvNh6pF7mgAQw==）で来るため、
 // permalink（hnpwm）や商品名（Tier/フリマ管理アシスト）も合わせて見ることで取り違えを防ぐ。
 // 管理アシストの Gumroad permalink: hnpwm ／ 出品Pro Gumroad permalink: rswvg
 const KANRI_PERMALINKS = ["hnpwm"]; // 管理アシストのpermalink（増えたらここに追加）
-
 function isKanriProduct(body) {
   const b = body || {};
   // 1) permalink 系に管理アシストのpermalinkが含まれるか
@@ -607,10 +580,8 @@ function isKanriProduct(body) {
     b.product_permalink, b.permalink, b.short_product_id, b.product_id
   ].map(v => String(v || "").toLowerCase());
   if (permalinkFields.some(v => KANRI_PERMALINKS.some(p => v.includes(p)))) return true;
-
   // 2) 従来どおり "kanri" / "fka" の文字を含むか（保険）
   if (permalinkFields.some(v => v.includes("kanri") || v.includes("fka"))) return true;
-
   // 3) 商品名・Tier・variants の表示名に「管理」が含まれるか
   const nameFields = [
     b.product_name, b.name, b.Tier, b.tier
@@ -620,18 +591,14 @@ function isKanriProduct(body) {
     if (b.variants) nameFields.push(JSON.stringify(b.variants));
   } catch (e) { /* ignore */ }
   if (nameFields.some(v => v.includes("管理"))) return true;
-
   return false;
 }
-
 function getPrefixFromBody(body) {
   return isKanriProduct(body) ? "FKA" : "FRP";
 }
-
 function getProductNameFromBody(body) {
   return isKanriProduct(body) ? "フリマ管理アシスト" : "フリマ出品アシスト Pro";
 }
-
 // Gumroadの recurrence（"monthly" / "yearly"）からプランを判定（最優先）
 function getPlanFromBody(body) {
   const rec = String(body.recurrence || "").toLowerCase();
@@ -644,14 +611,25 @@ function getPlanFromBody(body) {
   if (idlike.some(v => v.includes("year"))) return "year";
   return "month";
 }
-
+// ── サブスクの「更新課金（継続課金）」かどうかを判定する ──
+// Gumroadは、初回購入だけでなく毎月の自動課金のたびにも sale 通知を送ってくる。
+// 2回目以降（更新課金）には、それを示すフラグが付く。
+// フィールド名の揺れに備えて複数の候補を見る。
+// ★安全のため「明示的に true のときだけ true」を返す（初回購入で誤ってスキップしないように）。
+function isRecurringChargeEvent(body) {
+  const b = body || {};
+  const truthy = v => v === true || String(v || "").toLowerCase() === "true";
+  return truthy(b.is_recurring_charge)
+    || truthy(b.recurring_charge)
+    || truthy(b.is_recurring)
+    || truthy(b.recurring);
+}
 app.post("/webhook/gumroad", async (req, res) => {
   try {
     const body = req.body || {};
     console.log("=== Gumroad webhook RAW body ===");
     console.log(JSON.stringify(body, null, 2));
     console.log("=== Content-Type:", req.headers["content-type"], "===");
-
     const resourceName   = body.resource_name   || body.resourceName   || "";
     const productId      = body.product_id       || body.short_product_id || body.product_permalink || body.permalink || "";
     const buyerEmail     = body.email            || body.purchaser_email || body.buyer_email || "";
@@ -662,25 +640,50 @@ app.post("/webhook/gumroad", async (req, res) => {
     const cancelled      = body.cancelled        === true || body.cancelled === "true";
     const isCancelEvent  = refunded || chargebacked || disputed || cancelled;
     const isTest         = body.test === true || body.test === "true";
-
     console.log("Gumroad webhook parsed:", { resourceName, productId, buyerEmail, saleId, refunded, isCancelEvent, isTest });
-
     // ── 購入時: キー自動発行 → メール自動送信 ──
     const isSaleEvent = Boolean(saleId)
       && !isCancelEvent
       && resourceName !== "cancellation"
       && resourceName !== "refund";
-
     if (isSaleEvent) {
       const prefix      = getPrefixFromBody(body);
       const plan        = getPlanFromBody(body);
       const productName = getProductNameFromBody(body);
-
       if (isTest) {
         console.log("🧪 テストPing検知: 実発行はスキップします。判定結果 →", { prefix, plan, productName, buyerEmail });
         return res.json({ ok: true, action: "test_ok", would_issue: { prefix, plan, productName, buyerEmail } });
       }
+      // ── ★更新課金（継続課金）での二重発行を防ぐガード ─────────────
+      // Gumroadは「初回購入」も「毎月の更新課金」も同じ sale 通知を送ってくるため、
+      // 何もしないと更新のたびに新しいキーが発行・送信されてしまう。
+      // 次の①②のどちらかに当てはまれば、初回購入ではなく更新課金とみなし、
+      // キー発行・メール送信を行わずに終了する。
+      //   ① Gumroadが「更新課金」と明示している
+      //   ② 同じ購入者(email)が、同じ商品(prefix: FRP/FKA)の有効なキーを既に持っている
+      // ※②の確認に失敗した場合は「発行を続行」する（初回購入でキーが出ない事故を防ぐため）。
 
+      // ① Gumroadのフラグで判定
+      if (isRecurringChargeEvent(body)) {
+        console.log("🔁 Gumroadが更新課金と通知 → 新規キー発行をスキップ:", buyerEmail);
+        return res.json({ ok: true, action: "recurring_charge_skipped_by_flag", buyerEmail });
+      }
+      // ② 既存の有効キーの有無で判定
+      try {
+        const existing = await findActiveLicenseByEmailAndPrefix(buyerEmail, prefix);
+        if (existing) {
+          console.log("🔁 既存の有効キーあり → 更新課金とみなしスキップ:", existing.license_key, buyerEmail);
+          return res.json({
+            ok: true,
+            action: "recurring_charge_skipped_existing_key",
+            existingLicenseKey: existing.license_key,
+            buyerEmail
+          });
+        }
+      } catch (e) {
+        console.warn("既存キー確認に失敗 → 念のため新規発行を続行します:", e.message);
+      }
+      // ── ここから下は「初回購入」のときだけ実行される ──
       const licenseKey = generateLicenseKey(prefix);
       try {
         await insertLicense({
@@ -696,11 +699,9 @@ app.post("/webhook/gumroad", async (req, res) => {
         console.error("キー発行失敗:", e.message);
         return res.status(500).json({ ok: false, message: "キー発行に失敗しました" });
       }
-
       // ★メール送信の成否を必ず確認する（握りつぶさない）
       const sent = await sendLicenseEmail(buyerEmail, licenseKey, plan, productName);
       await markEmailSent(licenseKey, sent);
-
       if (!sent) {
         // 送信できなかった → 自分に緊急通知を送り、手動対応できるようにする
         console.error("🚨 キーは発行されたがメールが届いていません:", licenseKey, buyerEmail);
@@ -712,10 +713,8 @@ app.post("/webhook/gumroad", async (req, res) => {
         });
         return res.json({ ok: true, action: "issued_but_email_failed", licenseKey });
       }
-
       return res.json({ ok: true, action: "issued", licenseKey, emailSent: true });
     }
-
     // ── キャンセル・返金時: キー即無効化 → メール通知 ──
     if (
       resourceName === "cancellation" ||
@@ -729,7 +728,6 @@ app.post("/webhook/gumroad", async (req, res) => {
         console.error("キー無効化失敗:", e.message);
         return res.status(500).json({ ok: false, message: "キー無効化に失敗しました" });
       }
-
       // license_bindings側も無効化
       if (saleId) {
         try {
@@ -738,7 +736,6 @@ app.post("/webhook/gumroad", async (req, res) => {
           console.warn("license_bindings無効化失敗（無視）:", e.message);
         }
       }
-
       // 解約メール送信（無効化された各キーに対して）
       for (const row of cancelledRows) {
         const email = row.buyer_email || buyerEmail;
@@ -753,17 +750,14 @@ app.post("/webhook/gumroad", async (req, res) => {
           console.log("🚫 キー無効化:", row.license_key, email);
         }
       }
-
       return res.json({ ok: true, action: "cancelled", count: cancelledRows.length });
     }
-
     return res.json({ ok: true, action: "ignored", resourceName });
   } catch (e) {
     console.error("/webhook/gumroad error:", e);
     return res.status(500).json({ ok: false, message: e.message });
   }
 });
-
 app.listen(PORT, () => {
   console.log(`License server running on port ${PORT}`);
 });
