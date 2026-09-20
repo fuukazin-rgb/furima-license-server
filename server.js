@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import dns from "node:dns";
+import crypto from "node:crypto";
 // Render無料プランはIPv6の外向き通信ができないため、IPv4を優先させる
 dns.setDefaultResultOrder("ipv4first");
 // ★メール送信について★
@@ -20,6 +21,15 @@ const SENDER_EMAIL  = process.env.SENDER_EMAIL || "support@niche-hobby.com";
 const SENDER_NAME   = "niche-hobby";
 // 送信失敗の通知先（未設定なら SENDER_EMAIL 宛）
 const ADMIN_EMAIL   = process.env.ADMIN_EMAIL || SENDER_EMAIL;
+// ★追加: 管理用の合言葉（/trial/reset を使うときに必要。Renderの Environment に ADMIN_SECRET として設定する）
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
+// 合言葉の比較（タイミング攻撃対策つき）
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a || ""));
+  const bb = Buffer.from(String(b || ""));
+  if (ba.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
+}
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error("Missing Supabase environment variables");
 }
@@ -477,7 +487,8 @@ app.get("/", (req, res) => {
     storage: "supabase(licenses + trials + license_bindings)",
     trialDays: TRIAL_DAYS,
     hasSupabase: Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY),
-    hasMailer: mailerReady
+    hasMailer: mailerReady,
+    adminProtected: Boolean(ADMIN_SECRET)
   });
 });
 app.post("/verify", async (req, res) => {
@@ -539,6 +550,15 @@ app.post("/trial/status", async (req, res) => {
 // ── 開発・サポート用: トライアルのリセット ──
 app.post("/trial/reset", async (req, res) => {
   try {
+    // ★追加: 合言葉が無い・違うときは拒否（誰でもトライアルをやり直せてしまうのを防ぐ）
+    if (!ADMIN_SECRET) {
+      return res.status(503).json({ ok: false, message: "ADMIN_SECRET が未設定のため、リセットは無効です" });
+    }
+    const givenSecret = req.get("x-admin-secret") || "";
+    if (!safeEqual(givenSecret, ADMIN_SECRET)) {
+      console.warn("⚠️ /trial/reset: 合言葉が違うため拒否しました");
+      return res.status(403).json({ ok: false, message: "forbidden" });
+    }
     const { deviceId, fingerprint } = req.body || {};
     if (!deviceId && !fingerprint) {
       return res.status(400).json({ ok: false, message: "deviceId or fingerprint is required" });
